@@ -242,35 +242,60 @@ def create_children(cards, header, cols):
     return [create_child(card, header, cols) for card in cards]
 
 
+def export_cards(cards, output_path=OUTPUT, title_override=None):
+    header, cols = load_template()
+    cards = list(cards or [])
+
+    grouped_cards = {}
+    for card in cards:
+        listing_group = str(card.get("listing_group") or "default")
+        grouped_cards.setdefault(listing_group, []).append(card)
+
+    rows = []
+    for _, group_cards in grouped_cards.items():
+        if not group_cards:
+            continue
+
+        parent = create_parent(group_cards, header, cols)
+        group_title = title_override or group_cards[0].get("listing_title_override")
+        if group_title:
+            set_field(parent, cols, "Title", str(group_title))
+
+        rows.append(parent)
+        rows.extend(create_children(group_cards, header, cols))
+
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+    return {
+        "output_file": str(output_file),
+        "groups": len(grouped_cards),
+        "cards": len(cards),
+    }
+
+
 # ==========================================================
 # EXPORT
 # ==========================================================
 
 
 def export_csv():
-    header, cols = load_template()
     cards = load_inventory()
 
     print(f"Found {len(cards)} cards")
-    print("Building parent listing...")
-    parent = create_parent(cards, header, cols)
-
     print("Building variations...")
-    children = create_children(cards, header, cols)
-    print(f"Created {len(children)} variations")
-
-    Path(OUTPUT).parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerow(parent)
-        writer.writerows(children)
+    result = export_cards(cards, output_path=OUTPUT)
+    print(f"Created {result.get('cards', 0)} variations")
 
     print()
     print("====================================")
     print("Export Complete!")
     print("====================================")
-    print(f"Cards Exported : {len(children)}")
+    print(f"Cards Exported : {result.get('cards', 0)}")
     print(f"Output File    : {OUTPUT}")
     print()
 

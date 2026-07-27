@@ -31,6 +31,13 @@ class CardManagerPage(ctk.CTkFrame):
         self.github_source_label = None
         self.github_error_label = None
         self.github_progress_label = None
+        self.ebay_status_label = None
+        self.ebay_reason_label = None
+        self.ebay_progress_label = None
+        self.ebay_queue_progress_bar = None
+        self.ebay_queue_filter = "All"
+        self.ebay_filter_buttons = {}
+        self.ebay_queue_table_frame = None
         self.readiness_filter = "All"
         self.readiness_buttons = {}
         self.readiness_rows = []
@@ -553,11 +560,14 @@ class CardManagerPage(ctk.CTkFrame):
         self.add_inventory_section(content, card)
         self.add_pricing_section(content, card)
         self.add_github_section(content, card)
+        self.add_ebay_queue_section(content, card)
+
+        ebay_status = self.db.get_finish_ebay_status(self.selected_finish_id)
         self.add_section(
             content,
             "eBay",
             [
-                ("Listing Status", "Not listed" if not card.get("listing_id") else "Listed"),
+                ("Listing Status", ebay_status.get("status") or "Not Queued"),
                 ("Listing ID", card.get("listing_id") or "Pending"),
             ],
         )
@@ -882,6 +892,255 @@ class CardManagerPage(ctk.CTkFrame):
             command=self.refresh_github_status,
         ).pack(side="left", padx=(8, 0))
 
+    def add_ebay_queue_section(self, parent, card):
+        section = ctk.CTkFrame(
+            parent,
+            fg_color=CARD,
+            border_width=1,
+            border_color=BORDER,
+            corner_radius=14,
+        )
+        section.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(
+            section,
+            text="eBay Queue",
+            font=(FONT, 15, "bold"),
+            text_color=TEXT,
+        ).pack(anchor="w", padx=14, pady=(12, 8))
+
+        queue_status = self.db.refresh_ebay_queue_status(
+            set_id=self.selected_set,
+            queue_filter=self.ebay_queue_filter,
+        )
+        progress = queue_status.get("progress", {})
+        summary = queue_status.get("summary", {})
+        queue_rows = queue_status.get("queue", [])
+        finish_status = self.db.get_finish_ebay_status(self.selected_finish_id)
+
+        body = ctk.CTkFrame(section, fg_color="transparent")
+        body.pack(fill="x", padx=14, pady=(0, 8))
+
+        status_rows = [
+            ("Finish Status", finish_status.get("status") or "Not Queued"),
+            ("Export Batch", finish_status.get("export_batch") or "Not assigned"),
+            ("Queued At", finish_status.get("queued_at") or "Not queued"),
+            ("Exported At", finish_status.get("exported_at") or "Not exported"),
+        ]
+
+        labels_by_key = {}
+        for label_text, value in status_rows:
+            row = ctk.CTkFrame(body, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+
+            ctk.CTkLabel(
+                row,
+                text=f"{label_text}:",
+                font=(FONT, 12, "bold"),
+                text_color=SUBTEXT,
+                width=130,
+            ).pack(side="left")
+
+            value_label = ctk.CTkLabel(
+                row,
+                text=str(value),
+                font=(FONT, 12),
+                text_color=TEXT,
+                justify="left",
+                wraplength=520,
+            )
+            value_label.pack(side="left", padx=(8, 0))
+            labels_by_key[label_text] = value_label
+
+        self.ebay_status_label = labels_by_key.get("Finish Status")
+
+        self.ebay_reason_label = ctk.CTkLabel(
+            section,
+            text=finish_status.get("reason") or "",
+            font=(FONT, 11),
+            text_color=ERROR,
+            wraplength=620,
+            justify="left",
+        )
+        self.ebay_reason_label.pack(anchor="w", padx=14, pady=(0, 8))
+
+        progress_text = (
+            f"Queued: {summary.get('queued', 0)}   "
+            f"Exported: {summary.get('exported', 0)}   "
+            f"Failed: {summary.get('failed', 0)}   "
+            f"Remaining: {progress.get('remaining', 0)}   "
+            f"Current Export: {self._ebay_current_label(progress.get('current_export'))}"
+        )
+        self.ebay_progress_label = ctk.CTkLabel(
+            section,
+            text=progress_text,
+            font=(FONT, 11, "bold"),
+            text_color=SUBTEXT,
+        )
+        self.ebay_progress_label.pack(anchor="w", padx=14, pady=(0, 8))
+
+        progress_bar = ctk.CTkProgressBar(section, width=620)
+        total = max(1, int(progress.get("total", 0) or 0))
+        completed = int(progress.get("completed", 0) or 0)
+        progress_value = min(1.0, max(0.0, completed / total))
+        progress_bar.set(progress_value)
+        progress_bar.pack(anchor="w", padx=14, pady=(0, 8))
+        self.ebay_queue_progress_bar = progress_bar
+
+        metrics_row = ctk.CTkFrame(section, fg_color="transparent")
+        metrics_row.pack(fill="x", padx=14, pady=(0, 8))
+
+        metrics = [
+            ("Completed", progress.get("completed", 0)),
+            ("Remaining", progress.get("remaining", 0)),
+            ("Failed", progress.get("failed", 0)),
+            ("Elapsed Time", progress.get("elapsed_time", "00:00:00")),
+        ]
+
+        for key, value in metrics:
+            block = ctk.CTkFrame(metrics_row, fg_color=SUBTEXT, corner_radius=10)
+            block.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            ctk.CTkLabel(block, text=key, font=(FONT, 11), text_color=MUTED).pack(anchor="w", padx=10, pady=(8, 0))
+            ctk.CTkLabel(block, text=str(value), font=(FONT, 16, "bold"), text_color=TEXT).pack(anchor="w", padx=10, pady=(0, 8))
+
+        actions = ctk.CTkFrame(section, fg_color="transparent")
+        actions.pack(fill="x", padx=14, pady=(0, 8))
+
+        ctk.CTkButton(
+            actions,
+            text="Queue Selected Finish",
+            width=170,
+            command=self.queue_selected_finish_for_ebay,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            actions,
+            text="Queue Ready Finishes",
+            width=170,
+            command=self.queue_ready_finishes_for_ebay,
+        ).pack(side="left", padx=(8, 0))
+
+        ctk.CTkButton(
+            actions,
+            text="Export Queue",
+            width=130,
+            command=self.export_ebay_queue,
+        ).pack(side="left", padx=(8, 0))
+
+        ctk.CTkButton(
+            actions,
+            text="Retry Failed",
+            width=120,
+            command=self.retry_failed_ebay_exports,
+        ).pack(side="left", padx=(8, 0))
+
+        ctk.CTkButton(
+            actions,
+            text="Cancel Queue",
+            width=120,
+            command=self.cancel_ebay_queue,
+        ).pack(side="left", padx=(8, 0))
+
+        actions_two = ctk.CTkFrame(section, fg_color="transparent")
+        actions_two.pack(fill="x", padx=14, pady=(0, 8))
+
+        ctk.CTkButton(
+            actions_two,
+            text="Refresh Queue",
+            width=130,
+            command=self.refresh_ebay_queue,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            actions_two,
+            text="Clear Completed",
+            width=130,
+            command=self.clear_completed_ebay_queue,
+        ).pack(side="left", padx=(8, 0))
+
+        filter_row = ctk.CTkFrame(section, fg_color="transparent")
+        filter_row.pack(fill="x", padx=14, pady=(0, 8))
+
+        ctk.CTkLabel(
+            filter_row,
+            text="Queue Filters:",
+            font=(FONT, 12, "bold"),
+            text_color=SUBTEXT,
+        ).pack(side="left", padx=(0, 8))
+
+        self.ebay_filter_buttons = {}
+        for option in ["All", "Queued", "Exported", "Failed", "Ready", "Not Ready"]:
+            button = ctk.CTkButton(
+                filter_row,
+                text=option,
+                width=96,
+                height=28,
+                corner_radius=8,
+                border_width=1,
+                command=lambda selected=option: self.select_ebay_queue_filter(selected),
+            )
+            button.pack(side="left", padx=(0, 8))
+            self.ebay_filter_buttons[option] = button
+
+        self._update_ebay_filter_highlight()
+
+        table_section = ctk.CTkFrame(section, fg_color="transparent")
+        table_section.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+
+        header_row = ctk.CTkFrame(table_section, fg_color=SUBTEXT, corner_radius=8)
+        header_row.pack(fill="x", pady=(0, 4))
+
+        columns = [
+            ("Card", 140),
+            ("Finish", 100),
+            ("Quantity", 80),
+            ("Price", 80),
+            ("GitHub", 90),
+            ("Status", 100),
+            ("Export Batch", 120),
+        ]
+
+        for title, width in columns:
+            ctk.CTkLabel(
+                header_row,
+                text=title,
+                font=(FONT, 11, "bold"),
+                text_color=TEXT,
+                width=width,
+                anchor="w",
+            ).pack(side="left", padx=(8, 0), pady=6)
+
+        table_body = ctk.CTkScrollableFrame(table_section, fg_color="transparent", height=180)
+        table_body.pack(fill="both", expand=True)
+        self.ebay_queue_table_frame = table_body
+
+        for row in queue_rows:
+            item = ctk.CTkFrame(table_body, fg_color="transparent")
+            item.pack(fill="x", pady=2)
+
+            values = [
+                f"{row.get('card_number') or '?'} {row.get('card_name') or ''}".strip(),
+                row.get("finish") or "",
+                str(row.get("quantity") or 0),
+                f"${float(row.get('price') or 0):.2f}",
+                row.get("github_status") or "Pending",
+                row.get("status") or "Not Queued",
+                row.get("export_batch") or "",
+            ]
+
+            for idx, value in enumerate(values):
+                width = columns[idx][1]
+                ctk.CTkLabel(
+                    item,
+                    text=str(value),
+                    font=(FONT, 11),
+                    text_color=TEXT,
+                    width=width,
+                    anchor="w",
+                    justify="left",
+                    wraplength=width + 20,
+                ).pack(side="left", padx=(8, 0), pady=3)
+
     def add_image_workspace_section(self, parent, image_info):
         section = ctk.CTkFrame(
             parent,
@@ -1147,6 +1406,68 @@ class CardManagerPage(ctk.CTkFrame):
     def refresh_github_status(self):
         if self.selected_card is not None:
             self.render_detail(self.selected_card)
+
+    def queue_selected_finish_for_ebay(self):
+        if not self.selected_finish_id:
+            return
+
+        self.db.queue_finish_for_ebay(self.selected_finish_id, listing_group=self.selected_set)
+        self.refresh_ebay_queue()
+
+    def queue_ready_finishes_for_ebay(self):
+        if not self.selected_set:
+            return
+
+        self.db.queue_all_ready_finishes(self.selected_set)
+        self.refresh_ebay_queue()
+
+    def export_ebay_queue(self):
+        self.db.export_queue_to_csv(set_id=self.selected_set)
+        self.refresh_ebay_queue()
+
+    def retry_failed_ebay_exports(self):
+        self.db.retry_failed_exports(set_id=self.selected_set)
+        self.refresh_ebay_queue()
+
+    def cancel_ebay_queue(self):
+        self.db.cancel_ebay_queue(set_id=self.selected_set)
+        self.refresh_ebay_queue()
+
+    def clear_completed_ebay_queue(self):
+        self.db.clear_completed_queue(set_id=self.selected_set)
+        self.refresh_ebay_queue()
+
+    def refresh_ebay_queue(self):
+        if self.selected_card is not None:
+            self.render_detail(self.selected_card)
+
+    def select_ebay_queue_filter(self, queue_filter):
+        self.ebay_queue_filter = queue_filter
+        self._update_ebay_filter_highlight()
+        self.refresh_ebay_queue()
+
+    def _update_ebay_filter_highlight(self):
+        for option, button in self.ebay_filter_buttons.items():
+            if option == self.ebay_queue_filter:
+                button.configure(
+                    fg_color=ACCENT,
+                    border_color=ACCENT,
+                    text_color=TEXT,
+                )
+            else:
+                button.configure(
+                    fg_color=SUBTEXT,
+                    border_color=BORDER,
+                    text_color=TEXT,
+                )
+
+    def _ebay_current_label(self, current_export):
+        if not current_export:
+            return "None"
+
+        number = current_export.get("card_number") or "?"
+        finish = current_export.get("finish") or "Finish"
+        return f"{number} ({finish})"
 
     def _queue_current_label(self, current_upload):
         if not current_upload:

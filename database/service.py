@@ -9,6 +9,7 @@ import base64
 import requests
 
 from config import GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH
+from ebay_variation_exporter import export_cards
 
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
@@ -28,14 +29,47 @@ def build_workflow_status(card_data=None):
 
 
 class DatabaseService:
+    EBAY_STATUS_NOT_QUEUED = "Not Queued"
+    EBAY_STATUS_QUEUED = "Queued"
+    EBAY_STATUS_EXPORTING = "Exporting"
+    EBAY_STATUS_EXPORTED = "Exported"
+    EBAY_STATUS_FAILED = "Failed"
+    EBAY_STATUS_CANCELLED = "Cancelled"
+
     def __init__(self):
         self.db = Database()
         self.db.create()
+        self._ensure_finish_workspace_columns()
         self.initialize_finish_workspace()
         self.upload_queue = []
         self.upload_index = {}
         self.upload_processing = False
         self.upload_cancel_requested = False
+        self.ebay_cancel_requested = False
+
+    def _ensure_finish_workspace_columns(self):
+        existing_columns = {
+            str(row["name"])
+            for row in self.db.fetchall("PRAGMA table_info(finish_workspace)")
+        }
+
+        required_columns = {
+            "queued_at": "TEXT",
+            "exported_at": "TEXT",
+            "listing_group": "TEXT",
+            "listing_type": "TEXT",
+            "export_batch": "TEXT",
+            "listing_title_override": "TEXT",
+            "ebay_error": "TEXT",
+        }
+
+        for column_name, column_type in required_columns.items():
+            if column_name in existing_columns:
+                continue
+
+            self.db.execute(
+                f"ALTER TABLE finish_workspace ADD COLUMN {column_name} {column_type}"
+            )
 
     # -----------------
     # Sets
@@ -534,7 +568,10 @@ class DatabaseService:
 
         return self.queue_finish_upload(upload.get("finish_id"))
 
-    def cancel_queue(self):
+    def cancel_queue(self, queue_name="github", set_id=None):
+        if str(queue_name).lower() == "ebay":
+            return self.cancel_ebay_queue(set_id=set_id)
+
         self.upload_cancel_requested = True
         for upload in self.upload_queue:
             if upload.get("status") == "Pending":
@@ -543,13 +580,19 @@ class DatabaseService:
 
         return self.get_queue_progress()
 
-    def refresh_queue_status(self):
+    def refresh_queue_status(self, queue_name="github", set_id=None, queue_filter="All"):
+        if str(queue_name).lower() == "ebay":
+            return self.refresh_ebay_queue_status(set_id=set_id, queue_filter=queue_filter)
+
         return {
             "queue": [dict(upload) for upload in self.upload_queue],
             "progress": self.get_queue_progress(),
         }
 
-    def get_queue_progress(self):
+    def get_queue_progress(self, queue_name="github", set_id=None):
+        if str(queue_name).lower() == "ebay":
+            return self.get_ebay_queue_progress(set_id=set_id)
+
         completed = 0
         failed = 0
         remaining = 0
@@ -748,6 +791,599 @@ class DatabaseService:
 
     def _now_text(self):
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # -----------------
+    # eBay Publishing Queue
+    # -----------------
+
+    def queue_finish_for_ebay(
+        self,
+        finish_id,
+        listing_group="",
+        listing_type="Variation",
+        listing_title_override="",
+    ):
+        details = self._get_finish_upload_details(finish_id)
+        if details is None:
+            return {
+                "queued": False,
+                "reason": "Finish not found",
+                "entry": None,
+            }
+
+        self.create_finish_workspace(finish_id)
+        workspace = self.get_finish_workspace(finish_id) or {}
+        current_status = str(workspace.get("ebay_status") or self.EBAY_STATUS_NOT_QUEUED)
+
+        if current_status in (self.EBAY_STATUS_QUEUED, self.EBAY_STATUS_EXPORTING):
+            return {
+                "queued": False,
+                "reason": "Finish is already queued",
+                "entry": self._get_ebay_queue_entry(finish_id),
+            }
+
+        if current_status == self.EBAY_STATUS_EXPORTED:
+            return {
+                "queued": False,
+                "reason": "Finish has already been exported",
+                "entry": self._get_ebay_queue_entry(finish_id),
+            }
+
+        eligibility = self._evaluate_ebay_eligibility(finish_id)
+        if not eligibility.get("eligible"):
+            reason = "; ".join(eligibility.get("reasons") or ["Finish is not eligible"])
+            self._save_ebay_queue_fields(
+                finish_id,
+                ebay_status=self.EBAY_STATUS_NOT_QUEUED,
+                ebay_error=reason,
+            )
+            return {
+                "queued": False,
+                "reason": reason,
+                "entry": self._get_ebay_queue_entry(finish_id),
+            }
+
+        queue_group = str(listing_group or details.get("set_id") or "default").upper()
+        queue_type = str(listing_type or "Variation")
+
+        self._save_ebay_queue_fields(
+            finish_id,
+            ebay_status=self.EBAY_STATUS_QUEUED,
+            queued_at=self._now_text(),
+            listing_group=queue_group,
+            listing_type=queue_type,
+            listing_title_override=str(listing_title_override or workspace.get("listing_title_override") or ""),
+            export_batch="",
+            ebay_error="",
+        )
+
+        return {
+            "queued": True,
+            "reason": None,
+            "entry": self._get_ebay_queue_entry(finish_id),
+        }
+
+    def queue_all_ready_finishes(self, set_id):
+        readiness_rows = self.get_set_readiness(set_id)
+        queued = []
+        skipped = []
+
+        for row in readiness_rows:
+            finish_id = row.get("finish_id")
+            if not finish_id:
+                continue
+
+            result = self.queue_finish_for_ebay(finish_id, listing_group=row.get("set_id") or set_id)
+            if result.get("queued"):
+                queued.append(result.get("entry"))
+            else:
+                skipped.append(
+                    {
+                        "finish_id": finish_id,
+                        "reason": result.get("reason") or "Not eligible",
+                    }
+                )
+
+        return {
+            "queued": queued,
+            "skipped": skipped,
+        }
+
+    def export_queue_to_csv(self, set_id=None, output_path="output/Ebay_Variation_Upload.csv"):
+        self.ebay_cancel_requested = False
+        queued_rows = self._get_ebay_queue_rows(set_id=set_id, statuses=[self.EBAY_STATUS_QUEUED])
+
+        if not queued_rows:
+            return {
+                "exported": 0,
+                "failed": 0,
+                "skipped": 0,
+                "output_file": None,
+                "batch_id": None,
+                "reason": "No queued finishes",
+            }
+
+        batch_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        now_text = self._now_text()
+
+        cards_to_export = []
+        exportable_finish_ids = []
+        failed = []
+        skipped = []
+
+        for row in queued_rows:
+            finish_id = row.get("finish_id")
+            if not finish_id:
+                continue
+
+            if self.ebay_cancel_requested:
+                self._save_ebay_queue_fields(
+                    finish_id,
+                    ebay_status=self.EBAY_STATUS_CANCELLED,
+                    ebay_error="Export cancelled",
+                )
+                skipped.append({"finish_id": finish_id, "reason": "Export cancelled"})
+                continue
+
+            self._save_ebay_queue_fields(
+                finish_id,
+                ebay_status=self.EBAY_STATUS_EXPORTING,
+                export_batch=batch_id,
+                ebay_error="",
+            )
+
+            eligibility = self._evaluate_ebay_eligibility(finish_id)
+            if not eligibility.get("eligible"):
+                reason = "; ".join(eligibility.get("reasons") or ["Finish is not eligible"])
+                self._save_ebay_queue_fields(
+                    finish_id,
+                    ebay_status=self.EBAY_STATUS_FAILED,
+                    ebay_error=reason,
+                )
+                failed.append({"finish_id": finish_id, "reason": reason})
+                continue
+
+            readiness = eligibility.get("readiness") or {}
+            github_status = eligibility.get("github_status") or {}
+            details = eligibility.get("details") or {}
+
+            image_url = github_status.get("remote_url") or details.get("github_url") or ""
+
+            cards_to_export.append(
+                {
+                    "sku": self._build_ebay_sku(details),
+                    "name": str(details.get("name") or ""),
+                    "set": str(details.get("set_id") or ""),
+                    "number": str(details.get("number") or ""),
+                    "finish": str(details.get("finish") or ""),
+                    "qty": int(readiness.get("quantity") or 0),
+                    "price": float(readiness.get("sell_price") or 0),
+                    "image": str(image_url),
+                    "listing_group": str(row.get("listing_group") or details.get("set_id") or "default").upper(),
+                    "listing_title_override": str(row.get("listing_title_override") or ""),
+                }
+            )
+            exportable_finish_ids.append(finish_id)
+
+        if not cards_to_export:
+            return {
+                "exported": 0,
+                "failed": len(failed),
+                "skipped": len(skipped),
+                "output_file": None,
+                "batch_id": batch_id,
+                "reason": "No valid queued finishes",
+            }
+
+        try:
+            export_result = export_cards(cards_to_export, output_path=output_path)
+        except Exception as exc:
+            message = str(exc)
+            for finish_id in exportable_finish_ids:
+                self._save_ebay_queue_fields(
+                    finish_id,
+                    ebay_status=self.EBAY_STATUS_FAILED,
+                    ebay_error=message,
+                )
+
+            return {
+                "exported": 0,
+                "failed": len(exportable_finish_ids) + len(failed),
+                "skipped": len(skipped),
+                "output_file": None,
+                "batch_id": batch_id,
+                "reason": message,
+            }
+
+        for finish_id in exportable_finish_ids:
+            self._save_ebay_queue_fields(
+                finish_id,
+                ebay_status=self.EBAY_STATUS_EXPORTED,
+                exported_at=now_text,
+                export_batch=batch_id,
+                ebay_error="",
+            )
+
+        return {
+            "exported": len(exportable_finish_ids),
+            "failed": len(failed),
+            "skipped": len(skipped),
+            "output_file": export_result.get("output_file"),
+            "batch_id": batch_id,
+            "reason": None,
+        }
+
+    def cancel_ebay_queue(self, set_id=None):
+        self.ebay_cancel_requested = True
+        queued_rows = self._get_ebay_queue_rows(set_id=set_id, statuses=[self.EBAY_STATUS_QUEUED])
+        for row in queued_rows:
+            finish_id = row.get("finish_id")
+            if not finish_id:
+                continue
+
+            self._save_ebay_queue_fields(
+                finish_id,
+                ebay_status=self.EBAY_STATUS_CANCELLED,
+                ebay_error="Queue cancelled",
+            )
+
+        return self.get_ebay_queue_progress(set_id=set_id)
+
+    def retry_failed_exports(self, set_id=None):
+        failed_rows = self._get_ebay_queue_rows(set_id=set_id, statuses=[self.EBAY_STATUS_FAILED])
+        queued = []
+        skipped = []
+
+        for row in failed_rows:
+            finish_id = row.get("finish_id")
+            if not finish_id:
+                continue
+
+            result = self.queue_finish_for_ebay(
+                finish_id,
+                listing_group=row.get("listing_group"),
+                listing_type=row.get("listing_type") or "Variation",
+                listing_title_override=row.get("listing_title_override") or "",
+            )
+            if result.get("queued"):
+                queued.append(result.get("entry"))
+            else:
+                skipped.append(
+                    {
+                        "finish_id": finish_id,
+                        "reason": result.get("reason") or "Not eligible",
+                    }
+                )
+
+        return {
+            "queued": queued,
+            "skipped": skipped,
+        }
+
+    def clear_completed_queue(self, set_id=None):
+        completed_rows = self._get_ebay_queue_rows(
+            set_id=set_id,
+            statuses=[self.EBAY_STATUS_EXPORTED, self.EBAY_STATUS_CANCELLED],
+        )
+
+        for row in completed_rows:
+            finish_id = row.get("finish_id")
+            if not finish_id:
+                continue
+
+            self._save_ebay_queue_fields(
+                finish_id,
+                ebay_status=self.EBAY_STATUS_NOT_QUEUED,
+                queued_at="",
+                export_batch="",
+                ebay_error="",
+            )
+
+        return {
+            "cleared": len(completed_rows),
+            "progress": self.get_ebay_queue_progress(set_id=set_id),
+        }
+
+    def refresh_ebay_queue_status(self, set_id=None, queue_filter="All"):
+        queue_rows = self._get_ebay_queue_rows(set_id=set_id)
+        entries = []
+
+        for row in queue_rows:
+            finish_id = row.get("finish_id")
+            if not finish_id:
+                continue
+
+            eligibility = self._evaluate_ebay_eligibility(finish_id)
+            readiness = eligibility.get("readiness") or {}
+            github_status = eligibility.get("github_status") or {}
+            reasons = eligibility.get("reasons") or []
+
+            entry = {
+                **row,
+                "quantity": int(readiness.get("quantity") or 0),
+                "price": float(readiness.get("sell_price") or 0),
+                "github_status": github_status.get("status") or "Pending",
+                "is_ready": bool(eligibility.get("eligible")),
+                "reason": "; ".join(reasons) if reasons else "",
+            }
+            entries.append(entry)
+
+        filtered = self._filter_ebay_queue_entries(entries, queue_filter)
+
+        return {
+            "queue": filtered,
+            "progress": self.get_ebay_queue_progress(set_id=set_id),
+            "summary": self.get_export_summary(set_id=set_id),
+            "filter": queue_filter,
+        }
+
+    def get_ebay_queue_progress(self, set_id=None):
+        rows = self._get_ebay_queue_rows(set_id=set_id)
+
+        completed = 0
+        failed = 0
+        remaining = 0
+        current_export = None
+
+        started_markers = []
+
+        for row in rows:
+            status = row.get("status")
+            if status == self.EBAY_STATUS_EXPORTED:
+                completed += 1
+            elif status == self.EBAY_STATUS_FAILED:
+                failed += 1
+            elif status in (self.EBAY_STATUS_QUEUED, self.EBAY_STATUS_EXPORTING):
+                remaining += 1
+
+            if status == self.EBAY_STATUS_EXPORTING and current_export is None:
+                current_export = row
+
+            marker = row.get("queued_at")
+            if marker:
+                started_markers.append(marker)
+
+        elapsed = "00:00:00"
+        if started_markers:
+            try:
+                first_start = min(datetime.strptime(value, "%Y-%m-%d %H:%M:%S") for value in started_markers)
+                elapsed_seconds = max(0, int((datetime.now() - first_start).total_seconds()))
+                hours = elapsed_seconds // 3600
+                minutes = (elapsed_seconds % 3600) // 60
+                seconds = elapsed_seconds % 60
+                elapsed = f"{hours:02}:{minutes:02}:{seconds:02}"
+            except Exception:
+                elapsed = "00:00:00"
+
+        return {
+            "current_export": current_export,
+            "completed": completed,
+            "remaining": remaining,
+            "failed": failed,
+            "total": len(rows),
+            "elapsed_time": elapsed,
+        }
+
+    def get_export_summary(self, set_id=None):
+        rows = self._get_ebay_queue_rows(set_id=set_id)
+
+        summary = {
+            "queued": 0,
+            "exported": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "not_queued": 0,
+            "total": len(rows),
+        }
+
+        for row in rows:
+            status = row.get("status")
+            if status == self.EBAY_STATUS_QUEUED:
+                summary["queued"] += 1
+            elif status == self.EBAY_STATUS_EXPORTING:
+                summary["queued"] += 1
+            elif status == self.EBAY_STATUS_EXPORTED:
+                summary["exported"] += 1
+            elif status == self.EBAY_STATUS_FAILED:
+                summary["failed"] += 1
+            elif status == self.EBAY_STATUS_CANCELLED:
+                summary["cancelled"] += 1
+            else:
+                summary["not_queued"] += 1
+
+        return summary
+
+    def get_finish_ebay_status(self, finish_id):
+        entry = self._get_ebay_queue_entry(finish_id) or {}
+        eligibility = self._evaluate_ebay_eligibility(finish_id)
+        reasons = eligibility.get("reasons") or []
+
+        return {
+            "status": entry.get("status") or self.EBAY_STATUS_NOT_QUEUED,
+            "queued_at": entry.get("queued_at") or "",
+            "exported_at": entry.get("exported_at") or "",
+            "export_batch": entry.get("export_batch") or "",
+            "listing_group": entry.get("listing_group") or "",
+            "listing_type": entry.get("listing_type") or "",
+            "reason": "; ".join(reasons) if reasons else (entry.get("ebay_error") or ""),
+            "is_ready": bool(eligibility.get("eligible")),
+        }
+
+    def _build_ebay_sku(self, details):
+        set_id = str(details.get("set_id") or "SET").upper()
+        number = str(details.get("number") or "0").strip().replace(" ", "")
+        finish = str(details.get("finish") or "normal").strip().lower().replace(" ", "-")
+        return f"{set_id}-{number}-{finish}"
+
+    def _get_ebay_queue_entry(self, finish_id):
+        rows = self._get_ebay_queue_rows(finish_id=finish_id)
+        return rows[0] if rows else None
+
+    def _get_ebay_queue_rows(self, set_id=None, finish_id=None, statuses=None):
+        query = """
+            SELECT
+                cf.id AS finish_id,
+                cf.card_id,
+                cf.finish,
+                c.set_id,
+                c.number AS card_number,
+                c.name AS card_name,
+                fw.github_url,
+                COALESCE(NULLIF(fw.ebay_status, ''), ?) AS status,
+                fw.queued_at,
+                fw.exported_at,
+                fw.listing_group,
+                fw.listing_type,
+                fw.export_batch,
+                fw.listing_title_override,
+                fw.ebay_error
+            FROM card_finishes cf
+            INNER JOIN cards c
+                ON c.id = cf.card_id
+            LEFT JOIN finish_workspace fw
+                ON fw.finish_id = cf.id
+            WHERE 1 = 1
+        """
+
+        params = [self.EBAY_STATUS_NOT_QUEUED]
+
+        if set_id:
+            query += " AND c.set_id = ?"
+            params.append(set_id)
+
+        if finish_id:
+            query += " AND cf.id = ?"
+            params.append(finish_id)
+
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            query += f" AND COALESCE(NULLIF(fw.ebay_status, ''), ?) IN ({placeholders})"
+            params.append(self.EBAY_STATUS_NOT_QUEUED)
+            params.extend(statuses)
+
+        query += " ORDER BY c.number ASC, cf.id ASC"
+
+        return [dict(row) for row in self.db.fetchall(query, tuple(params))]
+
+    def _filter_ebay_queue_entries(self, entries, queue_filter):
+        selected = str(queue_filter or "All")
+
+        if selected == "All":
+            return entries
+        if selected == "Queued":
+            return [
+                row
+                for row in entries
+                if row.get("status") in (self.EBAY_STATUS_QUEUED, self.EBAY_STATUS_EXPORTING)
+            ]
+        if selected == "Exported":
+            return [row for row in entries if row.get("status") == self.EBAY_STATUS_EXPORTED]
+        if selected == "Failed":
+            return [row for row in entries if row.get("status") == self.EBAY_STATUS_FAILED]
+        if selected == "Ready":
+            return [row for row in entries if row.get("is_ready")]
+        if selected == "Not Ready":
+            return [row for row in entries if not row.get("is_ready")]
+
+        return entries
+
+    def _evaluate_ebay_eligibility(self, finish_id):
+        details = self._get_finish_upload_details(finish_id)
+        if details is None:
+            return {
+                "eligible": False,
+                "reasons": ["Finish not found"],
+                "readiness": None,
+                "github_status": None,
+                "details": None,
+            }
+
+        readiness = self.get_finish_readiness(finish_id) or {}
+        github_status = self.get_finish_github_status(finish_id) or {}
+
+        reasons = []
+
+        quantity = int(readiness.get("quantity") or 0)
+        if quantity <= 0:
+            reasons.append("Inventory Quantity must be greater than 0")
+
+        price = float(readiness.get("sell_price") or 0)
+        if price <= 0:
+            reasons.append("Sell Price must be greater than 0")
+
+        image_status = str(readiness.get("image_status") or "")
+        if image_status != "ready":
+            reasons.append("Image Status must be Ready")
+
+        github_state = str(github_status.get("status") or "")
+        if github_state != "Uploaded":
+            reasons.append("GitHub Status must be Uploaded")
+
+        if not bool(readiness.get("is_ready")):
+            reasons.append("Readiness must be Ready")
+
+        return {
+            "eligible": len(reasons) == 0,
+            "reasons": reasons,
+            "readiness": readiness,
+            "github_status": github_status,
+            "details": details,
+        }
+
+    def _save_ebay_queue_fields(
+        self,
+        finish_id,
+        ebay_status=None,
+        queued_at=None,
+        exported_at=None,
+        listing_group=None,
+        listing_type=None,
+        export_batch=None,
+        listing_title_override=None,
+        ebay_error=None,
+    ):
+        if not finish_id:
+            return
+
+        self.create_finish_workspace(finish_id)
+        workspace = self.get_finish_workspace(finish_id) or {}
+
+        next_status = workspace.get("ebay_status") if ebay_status is None else ebay_status
+        next_queued_at = workspace.get("queued_at") if queued_at is None else queued_at
+        next_exported_at = workspace.get("exported_at") if exported_at is None else exported_at
+        next_listing_group = workspace.get("listing_group") if listing_group is None else listing_group
+        next_listing_type = workspace.get("listing_type") if listing_type is None else listing_type
+        next_export_batch = workspace.get("export_batch") if export_batch is None else export_batch
+        next_title_override = workspace.get("listing_title_override") if listing_title_override is None else listing_title_override
+        next_error = workspace.get("ebay_error") if ebay_error is None else ebay_error
+
+        self.db.execute(
+            """
+            UPDATE finish_workspace
+            SET
+                ebay_status = ?,
+                queued_at = ?,
+                exported_at = ?,
+                listing_group = ?,
+                listing_type = ?,
+                export_batch = ?,
+                listing_title_override = ?,
+                ebay_error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE finish_id = ?
+            """,
+            (
+                str(next_status or ""),
+                str(next_queued_at or ""),
+                str(next_exported_at or ""),
+                str(next_listing_group or ""),
+                str(next_listing_type or ""),
+                str(next_export_batch or ""),
+                str(next_title_override or ""),
+                str(next_error or ""),
+                finish_id,
+            ),
+        )
 
     # -----------------
     # Inventory
@@ -955,6 +1591,13 @@ class DatabaseService:
         github_url="",
         ebay_listing_id="",
         ebay_status="",
+        queued_at="",
+        exported_at="",
+        listing_group="",
+        listing_type="",
+        export_batch="",
+        listing_title_override="",
+        ebay_error="",
         is_image_verified=0,
         is_ready_for_listing=0,
     ):
@@ -973,11 +1616,18 @@ class DatabaseService:
                 github_url,
                 ebay_listing_id,
                 ebay_status,
+                queued_at,
+                exported_at,
+                listing_group,
+                listing_type,
+                export_batch,
+                listing_title_override,
+                ebay_error,
                 is_image_verified,
                 is_ready_for_listing,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(finish_id) DO UPDATE SET
                 quantity = excluded.quantity,
                 cost_price = excluded.cost_price,
@@ -987,6 +1637,13 @@ class DatabaseService:
                 github_url = excluded.github_url,
                 ebay_listing_id = excluded.ebay_listing_id,
                 ebay_status = excluded.ebay_status,
+                queued_at = excluded.queued_at,
+                exported_at = excluded.exported_at,
+                listing_group = excluded.listing_group,
+                listing_type = excluded.listing_type,
+                export_batch = excluded.export_batch,
+                listing_title_override = excluded.listing_title_override,
+                ebay_error = excluded.ebay_error,
                 is_image_verified = excluded.is_image_verified,
                 is_ready_for_listing = excluded.is_ready_for_listing,
                 updated_at = CURRENT_TIMESTAMP
@@ -1001,6 +1658,13 @@ class DatabaseService:
                 github_url,
                 ebay_listing_id,
                 ebay_status,
+                queued_at,
+                exported_at,
+                listing_group,
+                listing_type,
+                export_batch,
+                listing_title_override,
+                ebay_error,
                 is_image_verified,
                 is_ready_for_listing,
             ),
