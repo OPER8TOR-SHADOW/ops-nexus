@@ -1,0 +1,16 @@
+PHASE9_VERIFY_RESULTS_START
+PASS | Publish one finish | status=Uploaded
+PASS | Publish multiple ready finishes | queued=2
+PASS | Skip finishes with missing images | skipped=2
+PASS | Skip finishes not Ready | skipped=2
+PASS | Queue continues after simulated failure | completed=2 failed=1
+PASS | Retry uploads succeed | queue_failed=0
+PASS | GitHub URLs stored correctly | uploaded=3
+PASS | Inventory unchanged | No inventory fields written in publishing methods
+PASS | Pricing unchanged | No pricing fields written in publishing methods
+PASS | Images unchanged | No image files or image data mutated by publishing methods
+PASS | Readiness unchanged | Readiness calculation methods not modified in this phase
+PASS | eBay unchanged | No eBay fields or methods invoked
+PASS | Screenshot captured | output\phase9_github_queue.png
+PASS | No regressions | failures=0
+PHASE9_VERIFY_RESULTS_END

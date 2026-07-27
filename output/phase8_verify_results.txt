@@ -1,0 +1,14 @@
+PHASE8_VERIFY_RESULTS_START
+PASS | Dashboard totals are correct | expected={'total_finishes': 240, 'ready': 0, 'missing_inventory': 240, 'missing_pricing': 240, 'missing_images': 90, 'ready_for_publishing': 0} displayed={'total_finishes': 240, 'ready': 0, 'missing_inventory': 240, 'missing_pricing': 240, 'missing_images': 90, 'ready_for_publishing': 0}
+PASS | Readiness updates immediately after editing inventory | before=missing_inventory after=missing_pricing
+PASS | Readiness updates immediately after editing pricing | sell=0.01
+PASS | Readiness updates immediately after assigning/removing images | image transitions validated
+PASS | Filters show the expected finishes | all_count=120
+PASS | Inventory unchanged | q=0
+PASS | Pricing unchanged | sell=0.0
+PASS | Images unchanged | path=C:\Users\Kyle\Desktop\eBay Listing Generator\images\me5\ME5-001-N.png
+PASS | GitHub unchanged | No GitHub writes in readiness flow
+PASS | eBay unchanged | No eBay writes in readiness flow
+PASS | Screenshot captured | output\phase8_readiness_dashboard.png
+PASS | No regressions | failures=0
+PHASE8_VERIFY_RESULTS_END
