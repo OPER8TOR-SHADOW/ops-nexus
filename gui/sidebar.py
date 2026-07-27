@@ -56,6 +56,7 @@ class Sidebar(ctk.CTkFrame):
             ("🃏 Card Manager", self.page_manager.show_card_manager),
             ("�🚀 Build Listing", self.page_manager.show_build),
             ("📦 Inventory", self.page_manager.show_inventory),
+            ("🧾 Sales", self.page_manager.show_sales),
             ("🖼 Images", self.page_manager.show_images),
             ("💰 Pricing", self.page_manager.show_pricing),
             ("📊 Statistics", self.page_manager.show_statistics),

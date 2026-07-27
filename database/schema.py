@@ -71,4 +71,24 @@ CREATE TABLE IF NOT EXISTS finish_workspace (
 
     FOREIGN KEY(finish_id) REFERENCES card_finishes(id)
 );
+
+CREATE TABLE IF NOT EXISTS sales (
+    sale_id TEXT PRIMARY KEY,
+    order_number TEXT,
+    sale_date TEXT,
+    platform TEXT,
+    buyer TEXT,
+    card_id TEXT,
+    finish_id INTEGER,
+    quantity INTEGER DEFAULT 0,
+    sale_price REAL DEFAULT 0,
+    fees REAL DEFAULT 0,
+    shipping_cost REAL DEFAULT 0,
+    status TEXT DEFAULT 'Completed',
+    notes TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY(card_id) REFERENCES cards(id),
+    FOREIGN KEY(finish_id) REFERENCES card_finishes(id)
+);
 """

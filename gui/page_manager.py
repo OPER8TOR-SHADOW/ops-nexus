@@ -4,6 +4,7 @@ from gui.pages.inventory import InventoryPage
 from gui.pages.images import ImagesPage
 from gui.pages.pricing import PricingPage
 from gui.pages.statistics import StatisticsPage
+from gui.pages.sales import SalesPage
 from gui.pages.settings import SettingsPage
 from gui.pages.set_manager import SetManagerPage
 from gui.pages.card_manager import CardManagerPage
@@ -59,6 +60,9 @@ class PageManager:
 
     def show_statistics(self):
         self.show_page(StatisticsPage)
+
+    def show_sales(self):
+        self.show_page(SalesPage)
 
     def show_settings(self):
         self.show_page(SettingsPage)
