@@ -41,7 +41,7 @@ class StatusBadge(ctk.CTkFrame):
             padx=(20, 0)
         )
 
-    def set_status(self, status):
+    def set_status(self, status, colour_override=None):
 
         if isinstance(status, bool):
 
@@ -66,6 +66,9 @@ class StatusBadge(ctk.CTkFrame):
 
             else:
                 colour = SUCCESS
+
+        if colour_override is not None:
+            colour = colour_override
 
         self.status.configure(
             text=text,

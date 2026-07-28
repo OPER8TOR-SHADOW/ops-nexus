@@ -91,4 +91,11 @@ CREATE TABLE IF NOT EXISTS sales (
     FOREIGN KEY(card_id) REFERENCES cards(id),
     FOREIGN KEY(finish_id) REFERENCES card_finishes(id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_cards_set_id ON cards(set_id);
+CREATE INDEX IF NOT EXISTS idx_card_finishes_card_id ON card_finishes(card_id);
+CREATE INDEX IF NOT EXISTS idx_finish_workspace_finish_id ON finish_workspace(finish_id);
+CREATE INDEX IF NOT EXISTS idx_sales_card_id ON sales(card_id);
+CREATE INDEX IF NOT EXISTS idx_sales_finish_id ON sales(finish_id);
+CREATE INDEX IF NOT EXISTS idx_sales_sale_date ON sales(sale_date);
 """

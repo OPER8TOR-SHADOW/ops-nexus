@@ -68,6 +68,14 @@ class ImagesPage(ctk.CTkFrame):
 
         refresh.pack(side="right")
 
+        self.selection_label = ctk.CTkLabel(
+            self,
+            text="Select an image to view details.",
+            font=(FONT, 12),
+            text_color=MUTED,
+        )
+        self.selection_label.pack(anchor="w", padx=20, pady=(0, 10))
+
         # ----------------------------
         # Gallery
         # ----------------------------
@@ -98,5 +106,4 @@ class ImagesPage(ctk.CTkFrame):
     # -------------------------------------
 
     def image_selected(self, image_path):
-
-        print(image_path)
+        self.selection_label.configure(text=f"Selected: {image_path.name}")

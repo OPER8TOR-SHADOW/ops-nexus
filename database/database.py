@@ -12,6 +12,8 @@ class Database:
     def __init__(self):
 
         self.connection = sqlite3.connect(DATABASE)
+        self.connection.execute("PRAGMA foreign_keys = ON")
+        self.connection.execute("PRAGMA busy_timeout = 5000")
 
         self.connection.row_factory = sqlite3.Row
 

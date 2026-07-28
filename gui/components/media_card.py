@@ -33,10 +33,8 @@ class MediaCard(ctk.CTkFrame):
 
         try:
 
-            print(f"Loading: {self.image_path}")
-
-            image = Image.open(self.image_path)
-            image.load()
+            with Image.open(self.image_path) as source_image:
+                image = source_image.convert("RGBA")
 
             self.preview = ctk.CTkImage(
                 light_image=image,
@@ -44,12 +42,8 @@ class MediaCard(ctk.CTkFrame):
                 size=(120, 168)
             )
 
-            print(f"Loaded: {self.filename}")
-
-        except Exception as e:
-
-            print(f"Failed: {self.image_path}")
-            print(e)
+        except Exception:
+            self.preview = None
 
         # -------------------------
         # Thumbnail

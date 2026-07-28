@@ -2,9 +2,12 @@ from pathlib import Path
 import os
 
 from inventory_service import load_inventory_rows
+from gui.services.operations_center_service import OperationsCenterService
 
 
 class DashboardService:
+
+    IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
     def __init__(self):
 
@@ -32,7 +35,11 @@ class DashboardService:
         if not self.images.exists():
             return 0
 
-        return len(list(self.images.glob("*.*")))
+        return sum(
+            1
+            for path in self.images.rglob("*")
+            if path.is_file() and path.suffix.lower() in self.IMAGE_EXTENSIONS
+        )
 
     # -----------------------------
     # CSV Files
@@ -79,6 +86,8 @@ class DashboardService:
 
     def get_dashboard_data(self):
 
+        recommendations = self.recommendation_widget()
+
         return {
             "inventory": self.inventory_count(),
             "images": self.image_count(),
@@ -89,4 +98,12 @@ class DashboardService:
             "output": self.output_ok(),
             "images_folder": self.images_ok(),
             "inventory_folder": self.inventory_ok(),
+            "recommendations": recommendations,
         }
+
+    def recommendation_widget(self):
+        service = OperationsCenterService()
+        try:
+            return service.get_dashboard_widget()
+        finally:
+            service.close()

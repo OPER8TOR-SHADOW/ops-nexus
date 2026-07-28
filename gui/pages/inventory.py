@@ -50,6 +50,7 @@ class InventoryPage(ctk.CTkFrame):
 
     def refresh(self):
         rows = load_inventory_rows()
+        self.listbox.configure(state="normal")
         self.listbox.delete("1.0", "end")
 
         if not rows:

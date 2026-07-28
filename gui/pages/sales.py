@@ -676,3 +676,9 @@ class SalesPage(ctk.CTkFrame):
                     f"Status: {row.get('status')} | Delta: {sign}{delta}\n"
                 ),
             )
+
+    def destroy(self):
+        service = getattr(self, "service", None)
+        if service is not None and getattr(service, "db_service", None) is not None:
+            service.db_service.close()
+        super().destroy()

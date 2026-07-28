@@ -203,8 +203,26 @@ class DatabaseService:
                 COALESCE(i.quantity, 0) AS inventory_quantity,
                 COALESCE(i.cost_price, 0) AS cost_price,
                 COALESCE(i.sell_price, 0) AS sell_price,
-                MAX(cf.image_path) AS image_path,
-                MAX(cf.github_url) AS github_url,
+                COALESCE(
+                    (
+                        SELECT cf_first.image_path
+                        FROM card_finishes cf_first
+                        WHERE cf_first.card_id = c.id
+                        ORDER BY cf_first.id ASC
+                        LIMIT 1
+                    ),
+                    ''
+                ) AS image_path,
+                COALESCE(
+                    (
+                        SELECT cf_first.github_url
+                        FROM card_finishes cf_first
+                        WHERE cf_first.card_id = c.id
+                        ORDER BY cf_first.id ASC
+                        LIMIT 1
+                    ),
+                    ''
+                ) AS github_url,
                 e.listing_id,
                 e.listed
             FROM cards c

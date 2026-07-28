@@ -117,13 +117,35 @@ class DashboardPage(ctk.CTkFrame):
         recent.pack(fill="x", pady=(0, 20))
 
         self.activity = ctk.CTkTextbox(
-            recent,
-            height=180
+            recent.content,
+            height=140
         )
 
         self.activity.pack(
-            fill="both",
-            expand=True,
+            fill="x",
+            expand=False,
+            padx=15,
+            pady=(0, 15)
+        )
+
+        # =====================================================
+        # Today's Recommendations
+        # =====================================================
+
+        recommendations = Section(
+            self.left,
+            "Today's Recommendations"
+        )
+
+        recommendations.pack(fill="x", pady=(0, 20))
+
+        self.recommendation_text = ctk.CTkTextbox(
+            recommendations.content,
+            height=110
+        )
+
+        self.recommendation_text.pack(
+            fill="x",
             padx=15,
             pady=(0, 15)
         )
@@ -137,7 +159,7 @@ class DashboardPage(ctk.CTkFrame):
             "System Status"
         )
 
-        status.pack(fill="both", expand=True)
+        status.pack(fill="x")
 
         self.python = StatusBadge(status, "Python")
         self.github = StatusBadge(status, "GitHub")
@@ -205,3 +227,11 @@ class DashboardPage(ctk.CTkFrame):
             "end",
             "\nSystem Ready."
         )
+
+        rec = data.get("recommendations", {})
+        self.recommendation_text.configure(state="normal")
+        self.recommendation_text.delete("1.0", "end")
+        self.recommendation_text.insert("end", f"🟢 {int(rec.get('ready_to_list', 0))} cards ready to list\n")
+        self.recommendation_text.insert("end", f"🟡 {int(rec.get('missing_images', 0))} cards missing images\n")
+        self.recommendation_text.insert("end", f"🔴 {int(rec.get('pricing_issues', 0))} pricing issues\n")
+        self.recommendation_text.configure(state="disabled")

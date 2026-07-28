@@ -8,6 +8,8 @@ from gui.pages.sales import SalesPage
 from gui.pages.settings import SettingsPage
 from gui.pages.set_manager import SetManagerPage
 from gui.pages.card_manager import CardManagerPage
+from gui.pages.business_analytics import BusinessAnalyticsPage
+from gui.pages.operations_center import OperationsCenterPage
 
 
 class PageManager:
@@ -63,6 +65,12 @@ class PageManager:
 
     def show_sales(self):
         self.show_page(SalesPage)
+
+    def show_business_analytics(self):
+        self.show_page(BusinessAnalyticsPage)
+
+    def show_operations_center(self):
+        self.show_page(OperationsCenterPage)
 
     def show_settings(self):
         self.show_page(SettingsPage)
