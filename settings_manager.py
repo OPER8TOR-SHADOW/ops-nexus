@@ -14,6 +14,10 @@ def load_settings():
             "default_condition": "Near Mint",
             "currency": "AUD",
             "title_format": "{name} {number}/{set_size} {rarity}",
+            "ebay_client_id": "",
+            "ebay_environment": "sandbox",
+            "ebay_redirect_uri": "Kyle_James-KyleJame-OPSNex-acyhbhq",
+            "ebay_oauth_state_secret": "",
         }
 
         save_settings(defaults)

@@ -1,5 +1,7 @@
 const VERSION = '14A.1.0';
-const OAUTH_TOKEN_URL = 'https://api.ebay.com/identity/v1/oauth2/token';
+const OAUTH_TOKEN_URL_PRODUCTION = 'https://api.ebay.com/identity/v1/oauth2/token';
+const OAUTH_TOKEN_URL_SANDBOX = 'https://api.sandbox.ebay.com/identity/v1/oauth2/token';
+const DEFAULT_EBAY_ENVIRONMENT = 'sandbox';
 const EXCHANGE_GRANT_TTL_SECONDS = 180;
 
 const consumedExchangeGrants = new Map();
@@ -82,9 +84,19 @@ function validateRequiredSecrets(env, required) {
 }
 
 async function handleOAuthCallback(request, env) {
+  const callbackUrl = new URL(request.url);
+  console.log('OAUTH CALLBACK HIT');
+  console.log(request.url);
+  console.log(callbackUrl.pathname);
+  console.log([...callbackUrl.searchParams.keys()]);
+  console.log(Boolean((callbackUrl.searchParams.get('code') || '').trim()));
+  console.log(Boolean((callbackUrl.searchParams.get('state') || '').trim()));
+
   validateRequiredSecrets(env, ['EBAY_CLIENT_ID', 'EBAY_CLIENT_SECRET']);
 
   const url = new URL(request.url);
+  console.log('[OAuth Callback] Entered handleOAuthCallback');
+  console.log(`[OAuth Callback] Request URL: ${request.url}`);
 
   if (!isTrustedOrigin(request, 'oauth')) {
     logWarn('oauth_origin_rejected', {
@@ -98,7 +110,11 @@ async function handleOAuthCallback(request, env) {
   const code = (url.searchParams.get('code') || '').trim();
   const state = (url.searchParams.get('state') || '').trim();
   const error = (url.searchParams.get('error') || '').trim();
+  console.log(`[OAuth Callback] Query has code: ${Boolean(code)}`);
+  console.log(`[OAuth Callback] Query has state: ${Boolean(state)}`);
+  console.log(`[OAuth Callback] Query has error: ${Boolean(error)}`);
   const stateCheck = await validateOAuthState(state, env);
+  console.log(`[OAuth Callback] validateOAuthState result: ${JSON.stringify(stateCheck)}`);
 
   if (error) {
     logWarn('oauth_callback_error', {
@@ -113,7 +129,7 @@ async function handleOAuthCallback(request, env) {
     }), 400);
   }
 
-  if (!stateCheck.ok || !isValidOAuthCode(code)) {
+  if (!stateCheck.ok || !code) {
     logWarn('oauth_callback_invalid_query', {
       codePresent: Boolean(code),
       statePresent: Boolean(state),
@@ -136,7 +152,9 @@ async function handleOAuthCallback(request, env) {
 
   let tokenPayload;
   try {
+    console.log('[OAuth Callback] Calling exchangeAuthorizationCode');
     tokenPayload = await exchangeAuthorizationCode(code, request, env);
+    console.log('[OAuth Callback] exchangeAuthorizationCode succeeded');
   } catch (error) {
     logWarn('oauth_token_exchange_failed', {
       reason: error instanceof Error ? error.message : String(error),
@@ -150,7 +168,9 @@ async function handleOAuthCallback(request, env) {
     }), 502);
   }
 
+  console.log('[OAuth Callback] Calling deliverOAuthTokens');
   const handoffResult = await deliverOAuthTokens(tokenPayload, stateCheck, request, env);
+  console.log(`[OAuth Callback] handoffResult: ${JSON.stringify(handoffResult)}`);
   if (!handoffResult.ok) {
     logWarn('oauth_token_handoff_failed', {
       mode: handoffResult.mode,
@@ -171,6 +191,8 @@ async function handleOAuthCallback(request, env) {
     : handoffResult.mode === 'browser_callback'
       ? 'OAuth token exchange succeeded. Finalizing secure transfer to OPS Nexus Desktop on this device...'
       : 'OAuth token exchange succeeded. Use the temporary secure exchange link in OPS Nexus Desktop.';
+
+  console.log(`[OAuth Callback] FINAL exchangeUrl sent to browser: ${safeString(handoffResult.exchangeUrl)}`);
 
   return html(renderOAuthResultPage(true, {
     title: 'OAuth callback received',
@@ -420,6 +442,17 @@ async function validateOAuthState(state, env) {
   }
 
   const stateSecret = safeString(env.OPS_NEXUS_STATE_SECRET).trim();
+  const stateSecretExists = Boolean(stateSecret);
+  const stateSecretLength = stateSecret.length;
+  const stateSecretHead = stateSecretLength ? stateSecret.slice(0, 8) : '';
+  const stateSecretTail = stateSecretLength ? stateSecret.slice(-8) : '';
+  console.log(`[OAuth State Worker] OPS_NEXUS_STATE_SECRET exists: ${stateSecretExists}`);
+  console.log(`[OAuth State Worker] OPS_NEXUS_STATE_SECRET length: ${stateSecretLength}`);
+  console.log(
+    stateSecretExists
+      ? `[OAuth State Worker] OPS_NEXUS_STATE_SECRET preview: ${stateSecretHead}...${stateSecretTail}`
+      : '[OAuth State Worker] OPS_NEXUS_STATE_SECRET preview: (missing)',
+  );
   if (!stateSecret) {
     return { ok: false, reason: 'state_secret_missing', signed: true };
   }
@@ -427,6 +460,9 @@ async function validateOAuthState(state, env) {
   const payloadB64 = parts[1];
   const sigB64 = parts[2];
   const signedData = `v1.${payloadB64}`;
+  console.log(`[OAuth State Worker] payloadB64: ${payloadB64}`);
+  console.log(`[OAuth State Worker] signedData: ${signedData}`);
+  console.log(`[OAuth State Worker] received sigB64: ${sigB64}`);
   const isSignatureValid = await verifyHmacSha256(stateSecret, signedData, sigB64);
   if (!isSignatureValid) {
     return { ok: false, reason: 'state_signature_invalid', signed: true };
@@ -463,6 +499,14 @@ async function exchangeAuthorizationCode(code, request, env) {
   const clientId = safeString(env.EBAY_CLIENT_ID).trim();
   const clientSecret = safeString(env.EBAY_CLIENT_SECRET).trim();
   const redirectUri = safeString(env.EBAY_REDIRECT_URI).trim() || `${new URL(request.url).origin}/oauth/callback`;
+  const ebayEnvironment = safeString(env.EBAY_ENVIRONMENT).trim().toLowerCase() || DEFAULT_EBAY_ENVIRONMENT;
+  const isSandbox = ebayEnvironment === 'sandbox';
+  const tokenUrl = isSandbox ? OAUTH_TOKEN_URL_SANDBOX : OAUTH_TOKEN_URL_PRODUCTION;
+  console.log('[Token Exchange] Starting exchangeAuthorizationCode');
+  console.log(`[Token Exchange] Environment: ${ebayEnvironment}`);
+  console.log(`[Token Exchange] Client ID: ${clientId}`);
+  console.log(`[Token Exchange] Redirect URI: ${redirectUri}`);
+  console.log(`[Token Exchange] eBay token endpoint: ${tokenUrl}`);
 
   const credentials = toBase64(`${clientId}:${clientSecret}`);
   const body = new URLSearchParams({
@@ -470,8 +514,11 @@ async function exchangeAuthorizationCode(code, request, env) {
     code,
     redirect_uri: redirectUri,
   });
+  console.log(
+    `[Token Exchange] POST body (safe): ${JSON.stringify({ grant_type: 'authorization_code', codeLength: code.length, redirect_uri: redirectUri })}`,
+  );
 
-  const response = await fetch(OAUTH_TOKEN_URL, {
+  const response = await fetch(tokenUrl, {
     method: 'POST',
     headers: {
       authorization: `Basic ${credentials}`,
@@ -480,17 +527,23 @@ async function exchangeAuthorizationCode(code, request, env) {
     },
     body: body.toString(),
   });
+  console.log(`[Token Exchange] HTTP status from eBay: ${response.status}`);
+  const responseText = await response.text();
+  const safeResponseText = redactSensitiveOAuthResponseText(responseText);
+  console.log(`[Token Exchange] Response body (raw): ${safeResponseText}`);
 
   if (!response.ok) {
-    const responseText = await response.text();
-    throw new Error(`eBay token endpoint error (${response.status}): ${responseText.slice(0, 180)}`);
+    throw new Error(`eBay token endpoint error (${response.status}): ${safeResponseText.slice(0, 180)}`);
   }
 
-  const tokenPayload = await response.json();
+  const tokenPayload = JSON.parse(responseText);
   const accessToken = safeString(tokenPayload?.access_token);
   const refreshToken = safeString(tokenPayload?.refresh_token);
   const expiresIn = Number(tokenPayload?.expires_in || 0);
   const refreshExpiresIn = Number(tokenPayload?.refresh_token_expires_in || 0);
+  console.log(
+    `[Token Exchange] Parsed token fields (lengths): ${JSON.stringify({ access_token_length: accessToken.length, refresh_token_length: refreshToken.length, token_type_length: safeString(tokenPayload?.token_type).length, scope_length: safeString(tokenPayload?.scope).length, expires_in: expiresIn, refresh_token_expires_in: refreshExpiresIn })}`,
+  );
 
   if (!accessToken || !refreshToken || !expiresIn || !refreshExpiresIn) {
     throw new Error('eBay token response is missing required fields.');
@@ -508,9 +561,13 @@ async function exchangeAuthorizationCode(code, request, env) {
 
 async function deliverOAuthTokens(tokenPayload, stateCheck, request, env) {
   const callbackUrl = (stateCheck?.desktopCallbackUrl || safeString(env.OPS_NEXUS_DESKTOP_CALLBACK_URL)).trim();
+  console.log('[Desktop Handoff] Starting deliverOAuthTokens');
+  console.log(`[Desktop Handoff] callbackUrl: ${callbackUrl}`);
+  console.log(`[Desktop Handoff] callbackUrl localhost: ${isLocalhostCallbackUrl(callbackUrl)}`);
 
   if (callbackUrl) {
     if (!isValidDesktopCallbackUrl(callbackUrl)) {
+      console.log('[Desktop Handoff] Early return: desktop_callback_invalid');
       return {
         ok: false,
         mode: 'callback',
@@ -521,10 +578,13 @@ async function deliverOAuthTokens(tokenPayload, stateCheck, request, env) {
     }
 
     if (isLocalhostCallbackUrl(callbackUrl)) {
+      console.log('[Desktop Handoff] Mode chosen: browser_callback');
       const exchange = await createExchangeGrantUrl(tokenPayload, request, env);
       if (!exchange.ok) {
+        console.log(`[Desktop Handoff] Early return from exchange setup: ${safeString(exchange.reason)}`);
         return exchange;
       }
+      console.log(`[Desktop Handoff] exchangeUrl: ${safeString(exchange.exchangeUrl)}`);
 
       return {
         ok: true,
@@ -544,37 +604,56 @@ async function deliverOAuthTokens(tokenPayload, stateCheck, request, env) {
       callbackHeaders.authorization = `Bearer ${callbackBearer}`;
     }
 
-    const callbackResponse = await fetch(callbackUrl, {
-      method: 'POST',
-      headers: callbackHeaders,
-      body: JSON.stringify({
-        provider: 'ebay',
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        ...tokenPayload,
-      }),
-    });
+    try {
+      const callbackResponse = await fetch(callbackUrl, {
+        method: 'POST',
+        headers: callbackHeaders,
+        body: JSON.stringify({
+          provider: 'ebay',
+          status: 'ok',
+          timestamp: new Date().toISOString(),
+          ...tokenPayload,
+        }),
+      });
+      console.log(`[Desktop Handoff] callback HTTP status: ${callbackResponse.status}`);
 
-    if (!callbackResponse.ok) {
+      if (callbackResponse.ok) {
+        console.log('[Desktop Handoff] Mode chosen: callback');
+        return {
+          ok: true,
+          mode: 'callback',
+          callbackUrl,
+        };
+      }
+
+      const callbackResponseHeaders = Object.fromEntries(callbackResponse.headers.entries());
+      const callbackResponseBody = await callbackResponse.text();
+      console.log(`[Desktop Handoff] callback response headers: ${JSON.stringify(callbackResponseHeaders)}`);
+      console.log(`[Desktop Handoff] callback response body: ${callbackResponseBody}`);
+      console.log(`[Desktop Handoff] callback failed, falling back to exchange: desktop_callback_http_${callbackResponse.status}`);
+    } catch (error) {
+      console.log(`[Desktop Handoff] callback failed, falling back to exchange: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    const exchange = await createExchangeGrantUrl(tokenPayload, request, env);
+    if (!exchange.ok) {
       return {
-        ok: false,
-        mode: 'callback',
-        reason: `desktop_callback_http_${callbackResponse.status}`,
+        ...exchange,
         userMessage: 'OAuth tokens were issued, but delivery to the desktop callback failed.',
-        actionMessage: 'Ensure the desktop callback receiver is running and reachable.',
+        actionMessage: 'Ensure the desktop callback receiver is running and reachable, or set OPS_NEXUS_EXCHANGE_SECRET for manual exchange.',
       };
     }
 
-
-        return createExchangeGrantUrl(tokenPayload, request, env);
-      }
-
-      async function createExchangeGrantUrl(tokenPayload, request, env) {
-    return { ok: true, mode: 'callback' };
+    return exchange;
   }
 
+  return createExchangeGrantUrl(tokenPayload, request, env);
+}
+
+async function createExchangeGrantUrl(tokenPayload, request, env) {
   const exchangeSecret = safeString(env.OPS_NEXUS_EXCHANGE_SECRET).trim();
   if (!exchangeSecret) {
+    console.log('[Desktop Handoff] Early return: exchange_secret_missing');
     return {
       ok: false,
       mode: 'exchange',
@@ -594,6 +673,11 @@ async function deliverOAuthTokens(tokenPayload, stateCheck, request, env) {
 
   const grant = await encryptExchangeGrant(grantPayload, exchangeSecret);
   const exchangeUrl = `${new URL(request.url).origin}/oauth/exchange?grant=${encodeURIComponent(grant)}`;
+  console.log(`[Desktop Handoff] exchange grant: ${grant}`);
+  console.log(`[Desktop Handoff] exchange grant length: ${grant.length}`);
+  console.log(`[Desktop Handoff] exchangeUrl exact: ${exchangeUrl}`);
+  console.log('[Desktop Handoff] Mode chosen: exchange');
+  console.log(`[Desktop Handoff] exchangeUrl: ${exchangeUrl}`);
 
   return {
     ok: true,
@@ -754,6 +838,30 @@ function safeString(value) {
   return String(value);
 }
 
+function redactSensitiveOAuthResponseText(value) {
+  const raw = safeString(value);
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      const sanitized = { ...parsed };
+      if (Object.prototype.hasOwnProperty.call(sanitized, 'access_token')) {
+        sanitized.access_token = '[redacted]';
+      }
+      if (Object.prototype.hasOwnProperty.call(sanitized, 'refresh_token')) {
+        sanitized.refresh_token = '[redacted]';
+      }
+      return JSON.stringify(sanitized);
+    }
+  } catch {
+    // Fall back to regex-based masking for non-JSON payloads.
+  }
+
+  return raw
+    .replace(/("access_token"\s*:\s*")[^"]*(")/gi, '$1[redacted]$2')
+    .replace(/("refresh_token"\s*:\s*")[^"]*(")/gi, '$1[redacted]$2');
+}
+
 function tail8(value) {
   if (!value) {
     return '';
@@ -799,22 +907,32 @@ function renderOAuthResultPage(ok, details) {
         const statusEl = document.getElementById('bridge-status');
         const exchangeUrl = ${JSON.stringify(details.bridgeConfig.exchangeUrl)};
         const callbackUrl = ${JSON.stringify(details.bridgeConfig.callbackUrl)};
+        const callbackPayload = {
+          provider: 'ebay',
+          exchange_url: exchangeUrl,
+        };
+        const callbackRequestBody = JSON.stringify(callbackPayload);
 
         try {
-          const tokenResponse = await fetch(exchangeUrl, {
-            method: 'GET',
-            cache: 'no-store',
-          });
-          if (!tokenResponse.ok) {
-            throw new Error('Token exchange request failed.');
-          }
-
-          const tokenPayload = await tokenResponse.json();
+          console.log('[Desktop Bridge] Browser POST exchange_url:', exchangeUrl);
+          console.log('[Desktop Bridge] callbackUrl:', callbackUrl);
+          console.log('[Desktop Bridge] POST payload:', callbackPayload);
+          console.log('FETCH URL:', callbackUrl);
+          console.log('FETCH BODY:', callbackRequestBody);
+          console.log('[Desktop Bridge] Starting localhost POST');
           const callbackResponse = await fetch(callbackUrl, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(tokenPayload),
+            body: callbackRequestBody,
           });
+          const callbackResponseHeaders = Object.fromEntries(callbackResponse.headers.entries());
+          const callbackResponseBody = await callbackResponse.text();
+          console.log('[Desktop Bridge] localhost POST completed');
+          console.log('FETCH STATUS:', callbackResponse.status);
+          console.log('FETCH TEXT:', callbackResponseBody);
+          console.log('[Desktop Bridge] callback HTTP status:', callbackResponse.status);
+          console.log('[Desktop Bridge] callback response headers:', callbackResponseHeaders);
+          console.log('[Desktop Bridge] callback response body:', callbackResponseBody);
           if (!callbackResponse.ok) {
             throw new Error('Desktop callback rejected token payload.');
           }
@@ -822,7 +940,12 @@ function renderOAuthResultPage(ok, details) {
           if (statusEl) {
             statusEl.innerHTML = '<strong>Desktop transfer:</strong> Completed.';
           }
-        } catch (_err) {
+        } catch (err) {
+          console.log('[Desktop Bridge] catch block entered');
+          console.log('[Desktop Bridge] localhost POST failed');
+          console.log('[Desktop Bridge] error name:', err && err.name ? err.name : '(unknown)');
+          console.log('[Desktop Bridge] error message:', err && err.message ? err.message : String(err));
+          console.log('[Desktop Bridge] error stack:', err && err.stack ? err.stack : '(no stack)');
           if (statusEl) {
             statusEl.innerHTML = '<strong>Desktop transfer:</strong> Failed. Keep OPS Nexus running and use the exchange link manually.';
           }

@@ -8,3 +8,4 @@ enabled = true
 
 [vars]
 APP_VERSION = "14A.1.0"
+EBAY_ENVIRONMENT = "sandbox"

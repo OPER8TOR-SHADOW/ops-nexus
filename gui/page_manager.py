@@ -10,6 +10,7 @@ from gui.pages.set_manager import SetManagerPage
 from gui.pages.card_manager import CardManagerPage
 from gui.pages.business_analytics import BusinessAnalyticsPage
 from gui.pages.operations_center import OperationsCenterPage
+from gui.pages.marketplace_manager import MarketplaceManagerPage
 
 
 class PageManager:
@@ -71,6 +72,9 @@ class PageManager:
 
     def show_operations_center(self):
         self.show_page(OperationsCenterPage)
+
+    def show_marketplace_manager(self):
+        self.show_page(MarketplaceManagerPage)
 
     def show_settings(self):
         self.show_page(SettingsPage)

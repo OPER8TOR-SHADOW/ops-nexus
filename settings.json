@@ -3,5 +3,9 @@
     "default_quantity": 5,
     "default_condition": "Near Mint",
     "currency": "AUD",
-    "title_format": "{name} {number}/{set_size} {rarity}"
+    "title_format": "{name} {number}/{set_size} {rarity}",
+    "ebay_client_id": "KyleJame-OPSNexus-SBX-3a4a6ebfb-d01e95b0",
+    "ebay_environment": "sandbox",
+    "ebay_redirect_uri": "Kyle_James-KyleJame-OPSNex-acyhbhq",
+    "ebay_oauth_state_secret": "e26749c0-7716-49bb-a1f9-6a197911df779f9f3469-39df-47cf-ad82-a7cae38993eb"
 }
