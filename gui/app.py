@@ -1,9 +1,12 @@
 import customtkinter as ctk
+import threading
 
 from gui.theme import setup_theme
 from gui.sidebar import Sidebar
 from gui.header import Header
 from gui.page_manager import PageManager
+from gui.pages.marketplace_manager import MarketplaceManagerPage
+from gui.services.marketplace_sync_service import MarketplaceSyncService
 
 
 class OPSNexus(ctk.CTk):
@@ -71,6 +74,8 @@ class OPSNexus(ctk.CTk):
         # ---------------- Page Manager ----------------
 
         self.pages = PageManager(self.page_container)
+        self.marketplace_sync_service = MarketplaceSyncService()
+        self.pages.marketplace_sync_service = self.marketplace_sync_service
 
         # ---------------- Sidebar ----------------
 
@@ -88,3 +93,27 @@ class OPSNexus(ctk.CTk):
         # ---------------- Default Page ----------------
 
         self.pages.show_dashboard()
+        self.after(1000, self._start_marketplace_sync_loop)
+
+    def _start_marketplace_sync_loop(self):
+        self._run_marketplace_sync()
+
+    def _run_marketplace_sync(self):
+        def worker():
+            try:
+                result = self.marketplace_sync_service.sync_marketplace_cache()
+                error = None
+            except Exception as exc:
+                result = None
+                error = exc
+
+            self.after(0, lambda: self._finish_marketplace_sync(result, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_marketplace_sync(self, result, error):
+        current_page = getattr(self.pages, "current_page", None)
+        if error is None and result and result.get("ok") and isinstance(current_page, MarketplaceManagerPage):
+            current_page.refresh_listings()
+
+        self.after(15 * 60 * 1000, self._run_marketplace_sync)

@@ -1,9 +1,11 @@
+import uuid
 import threading
+from tkinter import ttk
 
 import customtkinter as ctk
 
 from gui.theme import *
-from gui.services.ebay_api_service import EbayApiError, EbayApiService
+from database.repository import DatabaseRepository
 
 
 class MarketplaceManagerPage(ctk.CTkFrame):
@@ -12,16 +14,19 @@ class MarketplaceManagerPage(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
 
         self.page_manager = page_manager
-        self.service = EbayApiService()
+        self.repository = DatabaseRepository()
 
         self.listings = []
         self.filtered = []
+        self.selected_listing = None
+        self._thumbnail_cache = {}
+        self._row_lookup = {}
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(2, weight=1)
 
         self._build_ui()
-        self.refresh_status()
+        self.refresh_listings()
 
     def _build_ui(self):
         title = ctk.CTkLabel(
@@ -34,7 +39,7 @@ class MarketplaceManagerPage(ctk.CTkFrame):
 
         subtitle = ctk.CTkLabel(
             self,
-            text="Secure eBay OAuth connection and read-only active listings.",
+            text="Live eBay listings dashboard. SQLite is a cache only and refresh will synchronize when sync exists.",
             font=(FONT, 14),
             text_color=MUTED,
         )
@@ -43,220 +48,152 @@ class MarketplaceManagerPage(ctk.CTkFrame):
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 10))
 
-        ctk.CTkButton(actions, text="Sign In", width=100, command=self.sign_in).pack(side="left")
-        ctk.CTkButton(actions, text="Sign Out", width=100, command=self.sign_out).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(actions, text="Test Connection", width=130, command=self.test_connection).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(actions, text="Refresh Listings", width=130, command=self.refresh_listings).pack(side="left", padx=(8, 0))
+        self.search_var = ctk.StringVar(value="")
+        self.search_entry = ctk.CTkEntry(
+            actions,
+            textvariable=self.search_var,
+            placeholder_text="Search title, SKU, or status",
+            width=320,
+        )
+        self.search_entry.pack(side="left")
+        self.search_entry.bind("<Return>", lambda _event: self.apply_filters())
+        self.search_var.trace_add("write", lambda *_args: self.apply_filters())
+
+        ctk.CTkButton(actions, text="Refresh", width=110, command=self.sync_marketplace).pack(side="left", padx=(8, 0))
 
         self.status_message = ctk.CTkLabel(actions, text="", font=(FONT, 12), text_color=MUTED)
         self.status_message.pack(side="right")
 
-        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        body.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 20))
-        body.grid_columnconfigure(0, weight=1)
-
-        self._build_connection_section(body)
-        self._build_filters(body)
-        self._build_listing_table(body)
-
-    def _build_connection_section(self, parent):
-        section = ctk.CTkFrame(parent, fg_color=CARD, border_width=1, border_color=BORDER, corner_radius=14)
-        section.pack(fill="x", pady=(0, 12))
-
-        ctk.CTkLabel(section, text="Connection Status", font=(FONT, 18, "bold"), text_color=TEXT).pack(anchor="w", padx=14, pady=(12, 8))
-
-        self.status_labels = {}
-        fields = [
-            ("connection_status", "Connected / Disconnected"),
-            ("seller_username", "Seller Username"),
-            ("store_name", "Store Name"),
-            ("marketplace_region", "Marketplace Region"),
-            ("last_successful_connection", "Last Successful Connection"),
-            ("api_status", "API Status"),
-            ("oauth_status", "OAuth Status"),
-            ("environment", "Current Environment"),
-            ("latency_ms", "Last Test Latency"),
-        ]
-
-        for key, label in fields:
-            row = ctk.CTkFrame(section, fg_color="transparent")
-            row.pack(fill="x", padx=14, pady=3)
-
-            ctk.CTkLabel(row, text=f"{label}:", font=(FONT, 12, "bold"), text_color=SUBTEXT, width=220, anchor="w").pack(side="left")
-            value_label = ctk.CTkLabel(row, text="—", font=(FONT, 12), text_color=TEXT, anchor="w")
-            value_label.pack(side="left")
-            self.status_labels[key] = value_label
-
-        self.connection_error = ctk.CTkLabel(section, text="", font=(FONT, 11), text_color=ERROR, wraplength=900, justify="left")
-        self.connection_error.pack(anchor="w", padx=14, pady=(6, 12))
-
-    def _build_filters(self, parent):
-        section = ctk.CTkFrame(parent, fg_color=CARD, border_width=1, border_color=BORDER, corner_radius=14)
-        section.pack(fill="x", pady=(0, 12))
-
-        ctk.CTkLabel(section, text="Active Listings", font=(FONT, 18, "bold"), text_color=TEXT).pack(anchor="w", padx=14, pady=(12, 8))
-
-        row = ctk.CTkFrame(section, fg_color="transparent")
-        row.pack(fill="x", padx=14, pady=(0, 12))
-
-        self.search_var = ctk.StringVar(value="")
-        self.search_entry = ctk.CTkEntry(row, textvariable=self.search_var, placeholder_text="Search title, item ID, or SKU", width=300)
-        self.search_entry.pack(side="left", padx=(0, 8))
-        self.search_entry.bind("<Return>", lambda _event: self.apply_filters())
-
-        self.status_filter_var = ctk.StringVar(value="All")
-        self.status_filter_menu = ctk.CTkOptionMenu(row, values=["All"], variable=self.status_filter_var, width=140, command=lambda *_: self.apply_filters())
-        self.status_filter_menu.pack(side="left", padx=(0, 8))
-
-        self.sort_var = ctk.StringVar(value="Last Updated")
-        self.sort_menu = ctk.CTkOptionMenu(
-            row,
-            values=["Last Updated", "Start Date", "Price", "Quantity", "Title", "Item ID"],
-            variable=self.sort_var,
-            width=140,
-            command=lambda *_: self.apply_filters(),
-        )
-        self.sort_menu.pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(row, text="Search", width=90, command=self.apply_filters).pack(side="left")
-
-        self.count_label = ctk.CTkLabel(row, text="0 listing(s)", font=(FONT, 11), text_color=MUTED)
-        self.count_label.pack(side="right")
+        self._build_listing_table(self)
 
     def _build_listing_table(self, parent):
         section = ctk.CTkFrame(parent, fg_color=CARD, border_width=1, border_color=BORDER, corner_radius=14)
-        section.pack(fill="both", expand=True, pady=(0, 12))
+        section.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 20))
+        section.grid_columnconfigure(0, weight=1)
+        section.grid_rowconfigure(2, weight=1)
 
-        header = ctk.CTkFrame(section, fg_color=SUBTEXT, corner_radius=8)
-        header.pack(fill="x", padx=14, pady=(12, 4))
+        summary_row = ctk.CTkFrame(section, fg_color="transparent")
+        summary_row.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+        summary_row.grid_columnconfigure(0, weight=1)
 
-        self.columns = [
-            ("Title", 240),
-            ("Item ID", 110),
-            ("SKU", 130),
-            ("Price", 90),
-            ("Quantity", 80),
-            ("Status", 90),
-            ("Listing Type", 95),
-            ("Start Date", 140),
-            ("Last Updated", 140),
-        ]
+        ctk.CTkLabel(summary_row, text="Listings", font=(FONT, 18, "bold"), text_color=TEXT).grid(row=0, column=0, sticky="w")
+        self.count_label = ctk.CTkLabel(summary_row, text="0 listing(s)", font=(FONT, 12), text_color=MUTED)
+        self.count_label.grid(row=0, column=1, sticky="e")
 
-        for title, width in self.columns:
-            ctk.CTkLabel(header, text=title, font=(FONT, 11, "bold"), text_color=TEXT, width=width, anchor="w").pack(side="left", padx=(8, 0), pady=6)
+        table_frame = ctk.CTkFrame(section, fg_color="transparent")
+        table_frame.grid(row=2, column=0, sticky="nsew", padx=14, pady=(0, 12))
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
 
-        self.table = ctk.CTkScrollableFrame(section, fg_color="transparent", height=360)
-        self.table.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure(
+            "Marketplace.Treeview",
+            background="#171717",
+            fieldbackground="#171717",
+            foreground=TEXT,
+            rowheight=60,
+            borderwidth=0,
+            font=(FONT, 10),
+        )
+        style.configure(
+            "Marketplace.Treeview.Heading",
+            background="#232323",
+            foreground=TEXT,
+            font=(FONT, 10, "bold"),
+            relief="flat",
+        )
+        style.map("Marketplace.Treeview", background=[("selected", "#343434")])
 
-    # -------------------------
-    # Background helpers
-    # -------------------------
+        self.table = ttk.Treeview(
+            table_frame,
+            columns=("Title", "SKU", "Price", "Quantity", "Status", "Last Synced"),
+            show="tree headings",
+            style="Marketplace.Treeview",
+            selectmode="browse",
+        )
+        self.table.grid(row=0, column=0, sticky="nsew")
+        self.table.heading("#0", text="Thumbnail")
+        self.table.heading("Title", text="Title")
+        self.table.heading("SKU", text="SKU")
+        self.table.heading("Price", text="Price")
+        self.table.heading("Quantity", text="Quantity")
+        self.table.heading("Status", text="Status")
+        self.table.heading("Last Synced", text="Last Synced")
+        self.table.column("#0", width=92, minwidth=92, stretch=False, anchor="center")
+        self.table.column("Title", width=420, minwidth=240, stretch=True, anchor="w")
+        self.table.column("SKU", width=160, minwidth=120, stretch=False, anchor="w")
+        self.table.column("Price", width=100, minwidth=90, stretch=False, anchor="e")
+        self.table.column("Quantity", width=90, minwidth=80, stretch=False, anchor="center")
+        self.table.column("Status", width=120, minwidth=100, stretch=False, anchor="center")
+        self.table.column("Last Synced", width=170, minwidth=150, stretch=False, anchor="w")
+        self.table.bind("<Double-1>", self._on_row_double_click)
+        self.table.bind("<<TreeviewSelect>>", self._on_row_selected)
 
-    def _run_async(self, func, on_done, busy_text):
-        self.status_message.configure(text=busy_text, text_color=WARNING)
+        scrollbar = ctk.CTkScrollbar(table_frame, orientation="vertical", command=self.table.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        self.table.configure(yscrollcommand=scrollbar.set)
+
+        self.detail_label = ctk.CTkLabel(
+            section,
+            text="No marketplace listings available. Click Refresh to synchronize from eBay.",
+            font=(FONT, 12),
+            text_color=MUTED,
+            wraplength=1100,
+            justify="left",
+        )
+        self.detail_label.grid(row=4, column=0, sticky="w", padx=14, pady=(0, 12))
+
+    def refresh_listings(self):
+        rows = self.repository.list_listings()
+        self.listings = [dict(row) for row in rows]
+        self.status_message.configure(text=f"Loaded {len(self.listings)} listing(s) from SQLite.", text_color=SUCCESS)
+        self.apply_filters()
+
+    def sync_marketplace(self):
+        service = getattr(self.page_manager, "marketplace_sync_service", None)
+        if service is None:
+            self.refresh_listings()
+            return
+
+        self.status_message.configure(text="Syncing marketplace listings...", text_color=MUTED)
 
         def worker():
             try:
-                result = func()
+                result = service.sync_marketplace_cache(force_refresh=True)
                 error = None
             except Exception as exc:
                 result = None
                 error = exc
 
-            self.after(0, lambda: on_done(result, error))
+            self.after(0, lambda: self._finish_sync(result, error))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # -------------------------
-    # OAuth actions
-    # -------------------------
+    def _finish_sync(self, result, error):
+        if error is not None:
+            self.status_message.configure(text=str(error), text_color=ERROR)
+            return
 
-    def sign_in(self):
-        def do_sign_in():
-            return self.service.sign_in()
-
-        def done(result, error):
-            if error:
-                self.status_message.configure(text=str(error), text_color=ERROR)
-            else:
-                self.status_message.configure(text="Sign In successful.", text_color=SUCCESS)
-                self.refresh_status()
-                self.refresh_listings()
-
-        self._run_async(do_sign_in, done, "Finalizing OAuth...")
-
-    def sign_out(self):
-        try:
-            self.service.sign_out()
-            self.status_message.configure(text="Signed out.", text_color=SUCCESS)
-        except Exception as exc:
-            self.status_message.configure(text=str(exc), text_color=ERROR)
-        self.listings = []
-        self.apply_filters()
-        self.refresh_status()
-
-    def test_connection(self):
-        def do_test():
-            return self.service.test_connection()
-
-        def done(result, error):
-            if error:
-                self.status_message.configure(text=str(error), text_color=ERROR)
-            else:
-                if result.get("ok"):
-                    self.status_message.configure(
-                        text=f"Connection OK ({result.get('latency_ms')} ms, {result.get('environment')}).",
-                        text_color=SUCCESS,
-                    )
-                else:
-                    self.status_message.configure(text=result.get("message") or "Connection failed.", text_color=ERROR)
-            self.refresh_status()
-
-        self._run_async(do_test, done, "Testing eBay connection...")
-
-    # -------------------------
-    # Listings
-    # -------------------------
-
-    def refresh_listings(self):
-        def do_load():
-            return self.service.get_active_listings(force_refresh=True)
-
-        def done(result, error):
-            if error:
-                self.status_message.configure(text=str(error), text_color=ERROR)
-                self.listings = []
-            else:
-                self.listings = list(result or [])
-                self.status_message.configure(text=f"Loaded {len(self.listings)} listing(s).", text_color=SUCCESS)
-            self._refresh_filter_options()
-            self.apply_filters()
-            self.refresh_status()
-
-        self._run_async(do_load, done, "Downloading active listings...")
-
-    def _refresh_filter_options(self):
-        statuses = sorted({str(item.get("status") or "Unknown") for item in self.listings})
-        values = ["All"] + statuses
-        self.status_filter_menu.configure(values=values)
-        if self.status_filter_var.get() not in values:
-            self.status_filter_var.set("All")
+        self.refresh_listings()
+        if result and result.get("written") is not None:
+            self.status_message.configure(
+                text=f"Synced {result.get('written')} listing(s) from eBay.",
+                text_color=SUCCESS,
+            )
 
     def apply_filters(self):
         search = self.search_var.get().strip().lower()
-        status_filter = self.status_filter_var.get()
 
         rows = []
         for item in self.listings:
-            if status_filter != "All" and str(item.get("status") or "") != status_filter:
-                continue
-
             if search:
                 blob = " ".join(
                     [
                         str(item.get("title") or ""),
-                        str(item.get("item_id") or ""),
                         str(item.get("sku") or ""),
+                        str(item.get("status") or ""),
+                        str(item.get("listing_id") or ""),
                     ]
                 ).lower()
                 if search not in blob:
@@ -264,90 +201,98 @@ class MarketplaceManagerPage(ctk.CTkFrame):
 
             rows.append(item)
 
-        sort_key = self.sort_var.get()
-        self.filtered = sorted(rows, key=lambda x: self._sort_value(x, sort_key), reverse=self._sort_reverse(sort_key))
-
+        self.filtered = rows
         self._render_table()
         self.count_label.configure(text=f"{len(self.filtered)} listing(s)")
 
-    def _sort_reverse(self, sort_key):
-        return sort_key in ("Price", "Quantity", "Last Updated", "Start Date")
-
-    def _sort_value(self, item, sort_key):
-        if sort_key == "Price":
-            return float(item.get("price") or 0)
-        if sort_key == "Quantity":
-            return int(item.get("quantity") or 0)
-        if sort_key == "Title":
-            return str(item.get("title") or "").lower()
-        if sort_key == "Item ID":
-            return str(item.get("item_id") or "")
-        if sort_key == "Start Date":
-            return str(item.get("start_date") or "")
-        return str(item.get("last_updated") or "")
-
     def _render_table(self):
-        for child in self.table.winfo_children():
-            child.destroy()
+        for item in self.table.get_children():
+            self.table.delete(item)
+
+        self._row_lookup.clear()
+        self._thumbnail_cache.clear()
 
         if not self.filtered:
-            ctk.CTkLabel(self.table, text="No listings found.", text_color=MUTED, font=(FONT, 12)).pack(anchor="w", pady=8)
+            self.detail_label.configure(text="No marketplace listings available. Click Refresh to synchronize from eBay.")
             return
 
         for item in self.filtered:
-            row = ctk.CTkFrame(self.table, fg_color="transparent")
-            row.pack(fill="x", pady=2)
+            listing_id = str(item.get("id") or item.get("listing_id") or uuid.uuid4())
+            self._row_lookup[listing_id] = item
 
-            values = [
+            thumbnail = self._load_thumbnail(item.get("thumbnail_path"))
+            values = (
                 str(item.get("title") or ""),
-                str(item.get("item_id") or ""),
                 str(item.get("sku") or ""),
                 f"${float(item.get('price') or 0):.2f}",
                 str(int(item.get("quantity") or 0)),
                 str(item.get("status") or ""),
-                str(item.get("listing_type") or ""),
-                str(item.get("start_date") or ""),
-                str(item.get("last_updated") or ""),
-            ]
+                str(item.get("last_synced") or item.get("updated_at") or ""),
+            )
 
-            for idx, value in enumerate(values):
-                width = self.columns[idx][1]
-                ctk.CTkLabel(
-                    row,
-                    text=value,
-                    font=(FONT, 11),
-                    text_color=TEXT,
-                    width=width,
-                    anchor="w",
-                    justify="left",
-                    wraplength=width + 24,
-                ).pack(side="left", padx=(8, 0), pady=2)
+            self.table.insert(
+                "",
+                "end",
+                iid=listing_id,
+                image=thumbnail,
+                values=values,
+            )
+
+        self.detail_label.configure(text="Double-click a row to select a listing.")
 
     # -------------------------
-    # Status
+    # Selection and thumbnails
     # -------------------------
 
-    def refresh_status(self):
+    def _load_thumbnail(self, thumbnail_path):
+        if not thumbnail_path:
+            return None
+
+        cache_key = str(thumbnail_path)
+        if cache_key in self._thumbnail_cache:
+            return self._thumbnail_cache[cache_key]
+
         try:
-            status = self.service.get_connection_status(force=True)
-        except Exception as exc:
-            self.status_message.configure(text=str(exc), text_color=ERROR)
+            from tkinter import PhotoImage
+
+            image = PhotoImage(file=cache_key)
+            scale = max(1, int(max(image.width(), image.height()) / 48))
+            if scale > 1:
+                image = image.subsample(scale, scale)
+        except Exception:
+            return None
+
+        self._thumbnail_cache[cache_key] = image
+        return image
+
+    def _on_row_selected(self, _event=None):
+        selection = self.table.selection()
+        if not selection:
+            self.selected_listing = None
             return
 
-        for key, label in self.status_labels.items():
-            value = status.get(key)
-            if key == "latency_ms":
-                text = "—" if value in (None, "") else f"{value} ms"
-            else:
-                text = str(value or "—")
-            label.configure(text=text)
+        listing = self._row_lookup.get(selection[0])
+        if listing is None:
+            return
 
-        error_text = str(status.get("last_error") or "")
-        self.connection_error.configure(text=error_text)
+        self.selected_listing = listing
+        self.detail_label.configure(
+            text=f"Selected: {listing.get('title') or 'Listing'} | SKU {listing.get('sku') or '—'} | {listing.get('status') or '—'}"
+        )
+
+    def _on_row_double_click(self, event):
+        row_id = self.table.identify_row(event.y)
+        if not row_id:
+            return
+
+        self.table.selection_set(row_id)
+        self.table.focus(row_id)
+        self._on_row_selected()
 
     # -------------------------
     # Lifecycle
     # -------------------------
 
     def destroy(self):
+        self.repository.close()
         super().destroy()

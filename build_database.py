@@ -1,8 +1,6 @@
-from database.database import Database
+from database import initialize_database
 
-db = Database()
-
-db.create()
+db = initialize_database()
 
 db.close()
 

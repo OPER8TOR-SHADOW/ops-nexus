@@ -19,7 +19,7 @@ class BuildPage(ctk.CTkFrame):
         # ======================================================
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
+        self.grid_rowconfigure(5, weight=1)
 
         # ======================================================
         # Title
@@ -39,6 +39,20 @@ class BuildPage(ctk.CTkFrame):
             pady=(0, 20)
         )
 
+        subtitle = ctk.CTkLabel(
+            self,
+            text="Draft workspace for validation, pricing, and listing preparation before upload to eBay.",
+            font=(FONT, 14),
+            text_color=MUTED,
+        )
+
+        subtitle.grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(0, 18)
+        )
+
         # ======================================================
         # Set Selector
         # ======================================================
@@ -46,7 +60,7 @@ class BuildPage(ctk.CTkFrame):
         self.set_selector = SetSelector(self)
 
         self.set_selector.grid(
-            row=1,
+            row=2,
             column=0,
             sticky="ew",
             pady=(0, 20)
@@ -59,7 +73,7 @@ class BuildPage(ctk.CTkFrame):
         self.progress = ProgressCard(self)
 
         self.progress.grid(
-            row=2,
+            row=3,
             column=0,
             sticky="ew",
             pady=(0, 20)
@@ -81,7 +95,7 @@ class BuildPage(ctk.CTkFrame):
         )
 
         self.build_button.grid(
-            row=3,
+            row=4,
             column=0,
             sticky="ew",
             pady=(0, 20)
@@ -94,7 +108,7 @@ class BuildPage(ctk.CTkFrame):
         self.console = Console(self)
 
         self.console.grid(
-            row=4,
+            row=5,
             column=0,
             sticky="nsew"
         )

@@ -1,4 +1,4 @@
-from .database import Database
+from .repository import DatabaseRepository
 from pathlib import Path
 import os
 import subprocess
@@ -37,8 +37,7 @@ class DatabaseService:
     EBAY_STATUS_CANCELLED = "Cancelled"
 
     def __init__(self):
-        self.db = Database()
-        self.db.create()
+        self.db = DatabaseRepository()
         self._ensure_finish_workspace_columns()
         self.initialize_finish_workspace()
         self.upload_queue = []
