@@ -1,4 +1,5 @@
 import customtkinter as ctk
+from datetime import datetime
 
 from gui.theme import *
 
@@ -60,6 +61,12 @@ class Console(ctk.CTkFrame):
 
         self.console.configure(state="disabled")
 
+        textbox = self.console._textbox
+        textbox.tag_configure("INFO", foreground="#C7CED8")
+        textbox.tag_configure("SUCCESS", foreground=SUCCESS)
+        textbox.tag_configure("WARNING", foreground=WARNING)
+        textbox.tag_configure("ERROR", foreground=ERROR)
+
     # -----------------------------------
 
     def clear(self):
@@ -72,12 +79,36 @@ class Console(ctk.CTkFrame):
 
     # -----------------------------------
 
-    def write(self, text):
+    def write(self, text, level="INFO"):
+
+        level_name = str(level or "INFO").upper()
+        if level_name not in ("INFO", "SUCCESS", "WARNING", "ERROR"):
+            level_name = self._infer_level(text)
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"[{timestamp}] [{level_name}] {text}"
 
         self.console.configure(state="normal")
 
-        self.console.insert("end", text + "\n")
+        self.console.insert("end", line + "\n", level_name)
 
         self.console.see("end")
 
         self.console.configure(state="disabled")
+
+    # -----------------------------------
+
+    def _infer_level(self, text):
+
+        message = str(text or "").lower()
+
+        if any(token in message for token in ("error", "failed", "fail", "timeout", "exception")):
+            return "ERROR"
+
+        if any(token in message for token in ("warning", "warn", "skip")):
+            return "WARNING"
+
+        if any(token in message for token in ("complete", "success", "created", "uploaded", "downloaded")):
+            return "SUCCESS"
+
+        return "INFO"
