@@ -170,18 +170,31 @@ class BuildPage(ctk.CTkFrame):
     # Build Finished
     # ======================================================
 
-    def build_finished(self):
+    def build_finished(self, succeeded=True):
 
-        self.set_progress(
-            1,
-            "Build Complete"
-        )
+        if succeeded:
+            self.set_progress(
+                1,
+                "Build Complete"
+            )
+            self.log("")
+            self.log("=" * 60)
+            self.log("✅ Build Complete")
+            self.log("=" * 60)
+        else:
+            self.set_progress(
+                0,
+                "Build Failed"
+            )
+            self.progress.status.set_status(
+                "Failed",
+                ERROR,
+            )
+            self.log("")
+            self.log("=" * 60)
+            self.log("❌ Build Failed")
+            self.log("=" * 60)
 
         self.build_button.configure(
             state="normal"
         )
-
-        self.log("")
-        self.log("=" * 60)
-        self.log("✅ Build Complete")
-        self.log("=" * 60)

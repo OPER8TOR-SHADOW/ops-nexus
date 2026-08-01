@@ -62,7 +62,9 @@ class BuildWorker:
 
         process.wait()
 
+        succeeded = process.returncode == 0
+
         self.gui.after(
             0,
-            self.gui.build_finished
+            lambda: self.gui.build_finished(succeeded=succeeded)
         )

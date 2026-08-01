@@ -3,12 +3,16 @@ import threading
 import json
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
+import re
+import webbrowser
 from tkinter import ttk
+from tkinter import messagebox
 
 import customtkinter as ctk
 
 from gui.theme import *
 from database.repository import DatabaseRepository
+from gui.services.ebay_api_service import EbayApiService, EbayApiError
 
 
 class MarketplaceManagerPage(ctk.CTkFrame):
@@ -18,6 +22,7 @@ class MarketplaceManagerPage(ctk.CTkFrame):
 
         self.page_manager = page_manager
         self.repository = DatabaseRepository()
+        self.ebay_service = EbayApiService()
 
         self.listings = []
         self.filtered = []
@@ -31,6 +36,7 @@ class MarketplaceManagerPage(ctk.CTkFrame):
 
         self._build_ui()
         self.refresh_listings()
+        self._set_action_buttons_enabled(False)
 
     def _build_ui(self):
         title = ctk.CTkLabel(
@@ -303,8 +309,63 @@ class MarketplaceManagerPage(ctk.CTkFrame):
                 wraplength=360,
             ).grid(row=row_index, column=1, sticky="w", pady=2)
 
+        action_frame = ctk.CTkFrame(section, fg_color="transparent")
+        action_frame.grid(row=3, column=0, sticky="ew", padx=14, pady=(10, 6))
+        action_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(action_frame, text="Revise Price", font=(FONT, 11, "bold"), text_color=SUBTEXT).grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        self.price_edit_var = ctk.StringVar(value="")
+        self.price_entry = ctk.CTkEntry(action_frame, textvariable=self.price_edit_var, width=120)
+        self.price_entry.grid(row=0, column=1, sticky="w", padx=(8, 8))
+        self.revise_price_btn = ctk.CTkButton(
+            action_frame,
+            text="Update Price",
+            width=110,
+            command=self.revise_selected_price,
+        )
+        self.revise_price_btn.grid(row=0, column=2, sticky="w", padx=(0, 8))
+
+        ctk.CTkLabel(action_frame, text="Revise Qty", font=(FONT, 11, "bold"), text_color=SUBTEXT).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(8, 0),
+        )
+        self.quantity_edit_var = ctk.StringVar(value="")
+        self.quantity_entry = ctk.CTkEntry(action_frame, textvariable=self.quantity_edit_var, width=120)
+        self.quantity_entry.grid(row=1, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
+        self.revise_quantity_btn = ctk.CTkButton(
+            action_frame,
+            text="Update Qty",
+            width=110,
+            command=self.revise_selected_quantity,
+        )
+        self.revise_quantity_btn.grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(8, 0))
+
+        self.end_listing_btn = ctk.CTkButton(
+            action_frame,
+            text="End Listing",
+            width=110,
+            fg_color="#6B1E1E",
+            hover_color="#5A1717",
+            command=self.end_selected_listing,
+        )
+        self.end_listing_btn.grid(row=2, column=0, sticky="w", pady=(10, 0))
+
+        self.open_listing_btn = ctk.CTkButton(
+            action_frame,
+            text="Open in eBay",
+            width=110,
+            command=self.open_selected_listing,
+        )
+        self.open_listing_btn.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+
         ctk.CTkLabel(section, text="Metadata", font=(FONT, 13, "bold"), text_color=TEXT).grid(
-            row=3,
+            row=4,
             column=0,
             sticky="sw",
             padx=14,
@@ -312,7 +373,7 @@ class MarketplaceManagerPage(ctk.CTkFrame):
         )
 
         self.metadata_box = ctk.CTkTextbox(section, height=170, fg_color="#171717", border_width=1, border_color=BORDER)
-        self.metadata_box.grid(row=4, column=0, sticky="nsew", padx=14, pady=(0, 12))
+        self.metadata_box.grid(row=5, column=0, sticky="nsew", padx=14, pady=(0, 12))
         self.metadata_box.insert("1.0", "Select a listing to inspect metadata from local cache.")
         self.metadata_box.configure(state="disabled")
 
@@ -512,6 +573,10 @@ class MarketplaceManagerPage(ctk.CTkFrame):
         for key, value_var in self.detail_values.items():
             value_var.set(values.get(key, "—"))
 
+        self.price_edit_var.set(f"{float(listing.get('price') or 0):.2f}")
+        self.quantity_edit_var.set(str(int(listing.get("quantity") or 0)))
+        self._set_action_buttons_enabled(True)
+
         metadata = {
             "id": listing.get("id"),
             "listing_id": listing.get("listing_id"),
@@ -535,10 +600,161 @@ class MarketplaceManagerPage(ctk.CTkFrame):
         self.detail_image.configure(image=None, text="No Image")
         for value_var in self.detail_values.values():
             value_var.set("—")
+        self.price_edit_var.set("")
+        self.quantity_edit_var.set("")
+        self._set_action_buttons_enabled(False)
         self.metadata_box.configure(state="normal")
         self.metadata_box.delete("1.0", "end")
         self.metadata_box.insert("1.0", "Select a listing to inspect metadata from local cache.")
         self.metadata_box.configure(state="disabled")
+
+    def _set_action_buttons_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+        self.revise_price_btn.configure(state=state)
+        self.revise_quantity_btn.configure(state=state)
+        self.end_listing_btn.configure(state=state)
+        self.open_listing_btn.configure(state=state)
+        self.price_entry.configure(state=state)
+        self.quantity_entry.configure(state=state)
+
+    def revise_selected_price(self):
+        listing = self.selected_listing
+        if listing is None:
+            return
+
+        item_id = str(listing.get("item_id") or listing.get("listing_id") or "").strip()
+        if not item_id:
+            self.status_message.configure(text="Selected listing is missing Item ID.", text_color=ERROR)
+            return
+
+        price_text = str(self.price_edit_var.get() or "").strip()
+        if not re.fullmatch(r"\d+(\.\d{2})", price_text):
+            self.status_message.configure(text="Price must be a positive number with exactly two decimals (e.g., 12.34).", text_color=ERROR)
+            return
+
+        price_value = float(price_text)
+        if price_value <= 0:
+            self.status_message.configure(text="Price must be greater than zero.", text_color=ERROR)
+            return
+
+        if not messagebox.askyesno("Confirm Price Update", f"Revise price for Item {item_id} to ${price_value:.2f}?"):
+            return
+
+        self._run_listing_action(
+            operation_label="Price revised on eBay.",
+            func=lambda: self.ebay_service.revise_listing_price(item_id, price_value),
+        )
+
+    def revise_selected_quantity(self):
+        listing = self.selected_listing
+        if listing is None:
+            return
+
+        item_id = str(listing.get("item_id") or listing.get("listing_id") or "").strip()
+        if not item_id:
+            self.status_message.configure(text="Selected listing is missing Item ID.", text_color=ERROR)
+            return
+
+        quantity_text = str(self.quantity_edit_var.get() or "").strip()
+        if not re.fullmatch(r"\d+", quantity_text):
+            self.status_message.configure(text="Quantity must be an integer value (0 or greater).", text_color=ERROR)
+            return
+
+        quantity_value = int(quantity_text)
+        if quantity_value < 0:
+            self.status_message.configure(text="Quantity must be zero or greater.", text_color=ERROR)
+            return
+
+        if not messagebox.askyesno("Confirm Quantity Update", f"Revise quantity for Item {item_id} to {quantity_value}?"):
+            return
+
+        self._run_listing_action(
+            operation_label="Quantity revised on eBay.",
+            func=lambda: self.ebay_service.revise_listing_quantity(item_id, quantity_value),
+        )
+
+    def end_selected_listing(self):
+        listing = self.selected_listing
+        if listing is None:
+            return
+
+        item_id = str(listing.get("item_id") or listing.get("listing_id") or "").strip()
+        if not item_id:
+            self.status_message.configure(text="Selected listing is missing Item ID.", text_color=ERROR)
+            return
+
+        title = str(listing.get("title") or "Selected listing")
+        if not messagebox.askyesno(
+            "Confirm End Listing",
+            f"End listing for {title} (Item {item_id})?\n\nThis will end the live eBay listing.",
+        ):
+            return
+
+        self._run_listing_action(
+            operation_label="Listing ended on eBay.",
+            func=lambda: self.ebay_service.end_listing(item_id),
+        )
+
+    def open_selected_listing(self):
+        listing = self.selected_listing
+        if listing is None:
+            return
+
+        listing_url = str(listing.get("url") or "").strip()
+        if not listing_url:
+            item_id = str(listing.get("item_id") or listing.get("listing_id") or "").strip()
+            if not item_id:
+                self.status_message.configure(text="Selected listing has no URL or Item ID.", text_color=ERROR)
+                return
+            listing_url = f"https://www.ebay.com/itm/{item_id}"
+
+        webbrowser.open(listing_url)
+        self.status_message.configure(text="Opened listing in browser.", text_color=SUCCESS)
+
+    def _run_listing_action(self, operation_label, func):
+        self._set_action_buttons_enabled(False)
+        self.status_message.configure(text="Submitting update to eBay...", text_color=MUTED)
+
+        def worker():
+            try:
+                func()
+                operation_error = None
+            except Exception as exc:
+                operation_error = exc
+
+            sync_error = None
+            if operation_error is None:
+                sync_service = getattr(self.page_manager, "marketplace_sync_service", None)
+                if sync_service is not None:
+                    try:
+                        sync_service.sync_marketplace_cache(force_refresh=True)
+                    except Exception as exc:
+                        sync_error = exc
+
+            self.after(0, lambda: self._finish_listing_action(operation_label, operation_error, sync_error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_listing_action(self, operation_label, operation_error, sync_error):
+        if operation_error is not None:
+            message = str(operation_error)
+            if isinstance(operation_error, EbayApiError):
+                message = str(operation_error)
+            self.status_message.configure(text=message, text_color=ERROR)
+            self._set_action_buttons_enabled(self.selected_listing is not None)
+            return
+
+        self.refresh_listings()
+
+        if sync_error is not None:
+            self.status_message.configure(
+                text=f"{operation_label} Sync failed: {sync_error}. Cached data retained.",
+                text_color=ERROR,
+            )
+        else:
+            self.status_message.configure(text=f"{operation_label} Listings synchronized.", text_color=SUCCESS)
+
+        self._set_action_buttons_enabled(self.selected_listing is not None)
 
     def _enrich_listing(self, listing):
         payload_data = self._decode_payload(listing.get("payload"))

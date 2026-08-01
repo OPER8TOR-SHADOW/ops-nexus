@@ -7,18 +7,26 @@ from progress import Progress
 ROOT = Path(__file__).resolve().parent
 
 
-def run_step(name, script, progress, selected_set):
+def run_step(name, target, progress, selected_set, is_module=False):
     Progress.update(progress, name)
 
     print("\n" + "=" * 60)
     print(name)
     print("=" * 60)
 
-    command = [
-        sys.executable,
-        str(ROOT / script),
-        selected_set,
-    ]
+    if is_module:
+        command = [
+            sys.executable,
+            "-m",
+            target,
+            selected_set,
+        ]
+    else:
+        command = [
+            sys.executable,
+            str(ROOT / target),
+            selected_set,
+        ]
 
     print("Running:", " ".join(command))
     print()
@@ -45,16 +53,18 @@ def run_build(selected_set):
 
     run_step(
         "Downloading Pokémon Images",
-        "image_downloader.py",
+        "gui.services.image_downloader",
         10,
         selected_set,
+        is_module=True,
     )
 
     run_step(
         "Uploading Images to GitHub",
-        "github_upload.py",
+        "gui.services.github_upload",
         45,
         selected_set,
+        is_module=True,
     )
 
     run_step(

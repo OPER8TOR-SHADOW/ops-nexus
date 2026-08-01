@@ -17,6 +17,7 @@ import threading
 import time
 from urllib.parse import parse_qs, urlparse
 import webbrowser
+import xml.etree.ElementTree as ET
 
 import requests
 
@@ -873,6 +874,150 @@ class EbayApiService:
         self._last_error = ""
 
         return mapped
+
+    # -------------------------
+    # eBay API Write Calls
+    # -------------------------
+
+    def revise_listing_price(self, item_id, new_price):
+        item_id_text = str(item_id or "").strip()
+        if not item_id_text:
+            raise EbayApiError("Item ID is required to revise price.")
+
+        price_value = float(new_price)
+        if price_value <= 0:
+            raise EbayApiError("Price must be greater than zero.")
+
+        request_xml = (
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+            "<ReviseInventoryStatusRequest xmlns=\"urn:ebay:apis:eBLBaseComponents\">"
+            "<InventoryStatus>"
+            f"<ItemID>{item_id_text}</ItemID>"
+            f"<StartPrice>{price_value:.2f}</StartPrice>"
+            "</InventoryStatus>"
+            "</ReviseInventoryStatusRequest>"
+        )
+
+        self._post_trading_call("ReviseInventoryStatus", request_xml)
+        return {"ok": True, "item_id": item_id_text, "price": f"{price_value:.2f}"}
+
+    def revise_listing_quantity(self, item_id, new_quantity):
+        item_id_text = str(item_id or "").strip()
+        if not item_id_text:
+            raise EbayApiError("Item ID is required to revise quantity.")
+
+        quantity_value = int(new_quantity)
+        if quantity_value < 0:
+            raise EbayApiError("Quantity must be zero or greater.")
+
+        request_xml = (
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+            "<ReviseInventoryStatusRequest xmlns=\"urn:ebay:apis:eBLBaseComponents\">"
+            "<InventoryStatus>"
+            f"<ItemID>{item_id_text}</ItemID>"
+            f"<Quantity>{quantity_value}</Quantity>"
+            "</InventoryStatus>"
+            "</ReviseInventoryStatusRequest>"
+        )
+
+        self._post_trading_call("ReviseInventoryStatus", request_xml)
+        return {"ok": True, "item_id": item_id_text, "quantity": quantity_value}
+
+    def end_listing(self, item_id, reason="NotAvailable"):
+        item_id_text = str(item_id or "").strip()
+        if not item_id_text:
+            raise EbayApiError("Item ID is required to end listing.")
+
+        ending_reason = str(reason or "NotAvailable").strip() or "NotAvailable"
+
+        fixed_price_request = (
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+            "<EndFixedPriceItemRequest xmlns=\"urn:ebay:apis:eBLBaseComponents\">"
+            f"<ItemID>{item_id_text}</ItemID>"
+            f"<EndingReason>{ending_reason}</EndingReason>"
+            "</EndFixedPriceItemRequest>"
+        )
+
+        try:
+            self._post_trading_call("EndFixedPriceItem", fixed_price_request)
+            return {"ok": True, "item_id": item_id_text, "method": "EndFixedPriceItem"}
+        except EbayApiError:
+            end_item_request = (
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                "<EndItemRequest xmlns=\"urn:ebay:apis:eBLBaseComponents\">"
+                f"<ItemID>{item_id_text}</ItemID>"
+                f"<EndingReason>{ending_reason}</EndingReason>"
+                "</EndItemRequest>"
+            )
+            self._post_trading_call("EndItem", end_item_request)
+            return {"ok": True, "item_id": item_id_text, "method": "EndItem"}
+
+    def _post_trading_call(self, call_name, request_xml):
+        access_token = self._valid_access_token()
+        environment = self.get_config()["environment"]
+        api_base = self.API_BASES[environment]
+        endpoint = f"{api_base}/ws/api.dll"
+
+        headers = {
+            "X-EBAY-API-CALL-NAME": str(call_name),
+            "X-EBAY-API-IAF-TOKEN": access_token,
+            "X-EBAY-API-SITEID": str(self._resolve_trading_site_id()),
+            "X-EBAY-API-COMPATIBILITY-LEVEL": "1455",
+            "Content-Type": "text/xml",
+            "Accept": "text/xml",
+        }
+
+        response = requests.post(endpoint, headers=headers, data=request_xml.encode("utf-8"), timeout=45)
+        if response.status_code != 200:
+            raise EbayApiError(self._friendly_error(response, f"{call_name} failed."))
+
+        self._validate_trading_response(call_name, response.text)
+        self._last_api_ok = True
+        self._last_error = ""
+
+    def _validate_trading_response(self, call_name, response_text):
+        try:
+            root = ET.fromstring(response_text)
+        except Exception as exc:
+            raise EbayApiError(f"{call_name} failed: invalid XML response ({exc}).")
+
+        ack = self._xml_text_local(root, "Ack").strip().lower()
+        if ack in {"success", "warning"}:
+            return
+
+        short_message = self._xml_text_local(root, "ShortMessage")
+        long_message = self._xml_text_local(root, "LongMessage")
+        error_message = long_message or short_message or f"{call_name} failed."
+        raise EbayApiError(error_message)
+
+    def _resolve_trading_site_id(self):
+        token_data = self._load_tokens() if self.token_file.exists() else {}
+        profile = token_data.get("account_profile") or {}
+        marketplace = str(profile.get("marketplace_region") or "").strip().upper()
+        mapping = {
+            "EBAY_US": 0,
+            "EBAY_CA": 2,
+            "EBAY_GB": 3,
+            "EBAY_AU": 15,
+            "EBAY_AT": 16,
+            "EBAY_BE": 23,
+            "EBAY_FR": 71,
+            "EBAY_DE": 77,
+            "EBAY_IT": 101,
+            "EBAY_NL": 146,
+            "EBAY_ES": 186,
+            "EBAY_CH": 193,
+            "EBAY_IE": 205,
+        }
+        return mapping.get(marketplace, 0)
+
+    def _xml_text_local(self, root, local_name):
+        for node in root.iter():
+            tag = str(node.tag)
+            current_name = tag.rsplit("}", 1)[-1] if "}" in tag else tag
+            if current_name == local_name:
+                return str(node.text or "").strip()
+        return ""
 
     # -------------------------
     # Security helpers (Windows DPAPI)
