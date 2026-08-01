@@ -22,6 +22,8 @@ class BuildWorker:
         self.gui = gui
         self.selected_set = selected_set
         self.current_stage = None
+        self.upload_progress = None
+        self.csv_progress = None
 
         self.metrics = {
             "set": selected_set.upper(),
@@ -30,8 +32,11 @@ class BuildWorker:
             "images_uploaded": 0,
             "images_skipped": 0,
             "upload_failures": 0,
+            "download_failures": 0,
             "csv_generated": False,
             "csv_output": "output/Ebay_Variation_Upload.csv",
+            "csv_rows_processed": 0,
+            "csv_rows_total": 0,
             "failed_stage": None,
             "error_message": "",
         }
@@ -91,12 +96,21 @@ class BuildWorker:
 
             else:
 
-                self._parse_line(line)
+                parse_result = self._parse_line(line)
 
-                self.gui.after(
-                    0,
-                    lambda l=line: self.gui.log(l)
-                )
+                console_line = parse_result.get("console_line")
+                if console_line:
+                    console_level = parse_result.get("console_level", "INFO")
+                    self.gui.after(
+                        0,
+                        lambda l=console_line, level=console_level: self.gui.log(l, level)
+                    )
+
+                if not parse_result.get("suppress_console"):
+                    self.gui.after(
+                        0,
+                        lambda l=line: self.gui.log(l)
+                    )
 
         process.wait()
 
@@ -122,8 +136,12 @@ class BuildWorker:
 
         text = str(line or "").strip()
 
+        structured_result = self._parse_structured_progress(text)
+        if structured_result is not None:
+            return structured_result
+
         if not text:
-            return
+            return {"suppress_console": False}
 
         stage_key = self.STAGE_LABELS.get(text)
         if stage_key:
@@ -134,7 +152,7 @@ class BuildWorker:
                 "status": "Running",
                 "operation": f"Current: {text}...",
             })
-            return
+            return {"suppress_console": False}
 
         if text.endswith("complete."):
             for stage_text, key in self.STAGE_LABELS.items():
@@ -144,7 +162,7 @@ class BuildWorker:
                         "stage": key,
                         "status": "Complete",
                     })
-                    return
+                    return {"suppress_console": False}
 
         cards_match = re.search(r"Found\s+(\d+)\s+cards", text, re.IGNORECASE)
         if cards_match:
@@ -155,6 +173,7 @@ class BuildWorker:
                     "type": "stage_detail",
                     "stage": self.STAGE_DOWNLOAD,
                     "progress": f"{cards} / {cards}",
+                    "progress_value": 1.0,
                     "operation": "Current: Preparing image downloads...",
                 })
             elif self.current_stage == self.STAGE_CSV:
@@ -163,24 +182,122 @@ class BuildWorker:
                     "stage": self.STAGE_CSV,
                     "operation": "Current: Creating Parent Listing...",
                 })
-            return
+            return {"suppress_console": False}
 
         if self.current_stage == self.STAGE_DOWNLOAD:
             self._parse_download_line(text)
-            return
+            return {"suppress_console": False}
 
         if self.current_stage == self.STAGE_UPLOAD:
             self._parse_upload_line(text)
-            return
+            return {"suppress_console": False}
 
         if self.current_stage == self.STAGE_CSV:
             self._parse_csv_line(text)
-            return
+            return {"suppress_console": False}
 
         if "error:" in text.lower():
             self.metrics["error_message"] = text
             if not self.metrics["failed_stage"]:
                 self.metrics["failed_stage"] = self.current_stage
+
+        return {"suppress_console": False}
+
+    # --------------------------------
+
+    def _parse_structured_progress(self, text):
+
+        upload_header = re.match(r"\[UPLOAD\]\s+(\d+)/(\d+)", text)
+        if upload_header:
+            current = int(upload_header.group(1))
+            total = int(upload_header.group(2))
+            self.upload_progress = {
+                "current": current,
+                "total": total,
+            }
+            return {"suppress_console": True}
+
+        if self.upload_progress and text.startswith("FILE="):
+            self.upload_progress["file"] = text.split("=", 1)[1].strip()
+            return {"suppress_console": True}
+
+        if self.upload_progress and text.startswith("UPLOADED="):
+            self.upload_progress["uploaded"] = int(text.split("=", 1)[1].strip() or 0)
+            return {"suppress_console": True}
+
+        if self.upload_progress and text.startswith("SKIPPED="):
+            self.upload_progress["skipped"] = int(text.split("=", 1)[1].strip() or 0)
+            return {"suppress_console": True}
+
+        if self.upload_progress and text.startswith("FAILED="):
+            self.upload_progress["failed"] = int(text.split("=", 1)[1].strip() or 0)
+
+            current = int(self.upload_progress.get("current", 0))
+            total = max(1, int(self.upload_progress.get("total", 0) or 1))
+            file_name = self.upload_progress.get("file", "--")
+            uploaded = int(self.upload_progress.get("uploaded", 0))
+            skipped = int(self.upload_progress.get("skipped", 0))
+            failed = int(self.upload_progress.get("failed", 0))
+
+            self.metrics["images_uploaded"] = uploaded
+            self.metrics["images_skipped"] = skipped
+            self.metrics["upload_failures"] = failed
+
+            self._emit_event({
+                "type": "stage_detail",
+                "stage": self.STAGE_UPLOAD,
+                "progress": f"{current} / {total}",
+                "progress_value": current / total,
+                "current_file": file_name,
+                "uploaded": uploaded,
+                "skipped": skipped,
+                "failed": failed,
+            })
+
+            console_line = f"[UPLOAD] {current}/{total} {file_name}"
+            self.upload_progress = None
+            return {
+                "suppress_console": True,
+                "console_line": console_line,
+                "console_level": "INFO",
+            }
+
+        csv_header = re.match(r"\[CSV\]\s+(\d+)/(\d+)", text)
+        if csv_header:
+            processed = int(csv_header.group(1))
+            total = int(csv_header.group(2))
+            self.csv_progress = {
+                "processed": processed,
+                "total": total,
+            }
+            return {"suppress_console": True}
+
+        if self.csv_progress and text.startswith("CURRENT="):
+            current_card = text.split("=", 1)[1].strip()
+            processed = int(self.csv_progress.get("processed", 0))
+            total = max(1, int(self.csv_progress.get("total", 0) or 1))
+
+            self.metrics["csv_rows_processed"] = processed
+            self.metrics["csv_rows_total"] = total
+            self.metrics["cards_processed"] = max(self.metrics["cards_processed"], total)
+
+            self._emit_event({
+                "type": "stage_detail",
+                "stage": self.STAGE_CSV,
+                "progress": f"{processed} / {total}",
+                "progress_value": processed / total,
+                "current_file": current_card,
+            })
+
+            console_line = f"[CSV] {processed}/{total} {current_card}"
+            self.csv_progress = None
+            return {
+                "suppress_console": True,
+                "console_line": console_line,
+                "console_level": "INFO",
+            }
+
+        return None
 
     # --------------------------------
 
@@ -195,6 +312,7 @@ class BuildWorker:
                 "type": "stage_detail",
                 "stage": self.STAGE_DOWNLOAD,
                 "progress": f"{current} / {total}",
+                "progress_value": current / max(1, total),
                 "operation": f"Current: {filename}",
             })
             return
@@ -206,10 +324,7 @@ class BuildWorker:
 
         failed_count = re.search(r"Failed\s*:\s*(\d+)", text, re.IGNORECASE)
         if failed_count:
-            self.metrics["upload_failures"] = max(
-                self.metrics["upload_failures"],
-                int(failed_count.group(1))
-            )
+            self.metrics["download_failures"] = int(failed_count.group(1))
 
     # --------------------------------
 
@@ -222,6 +337,7 @@ class BuildWorker:
                 "type": "stage_detail",
                 "stage": self.STAGE_UPLOAD,
                 "progress": f"0 / {total}",
+                "progress_value": 0,
                 "operation": "Current: Preparing upload queue...",
                 "uploaded": 0,
                 "skipped": 0,
@@ -247,6 +363,7 @@ class BuildWorker:
                 "type": "stage_detail",
                 "stage": self.STAGE_UPLOAD,
                 "progress": f"{current} / {total}",
+                "progress_value": current / max(1, total),
                 "operation": f"Current: {filename}",
                 "uploaded": self.metrics["images_uploaded"],
                 "skipped": self.metrics["images_skipped"],
@@ -283,6 +400,7 @@ class BuildWorker:
             self._emit_event({
                 "type": "stage_detail",
                 "stage": self.STAGE_CSV,
+                "progress_value": 0,
                 "operation": "Current: Writing Variations...",
             })
             return
@@ -292,6 +410,7 @@ class BuildWorker:
                 "type": "stage_detail",
                 "stage": self.STAGE_CSV,
                 "operation": "Current: Saving CSV...",
+                "progress_value": 1.0,
             })
             return
 
@@ -306,7 +425,8 @@ class BuildWorker:
                 "type": "stage_status",
                 "stage": self.STAGE_CSV,
                 "status": "Complete",
-                "progress": "Progress: Complete",
+                "progress": "Complete",
+                "progress_value": 1.0,
             })
             return
 

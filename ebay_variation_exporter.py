@@ -49,6 +49,11 @@ SHIPPING_PROFILE = "FREE POSTAGE"
 COVER_IMAGE_URL = "https://raw.githubusercontent.com/OPER8TOR-SHADOW/ops-ebay-images/refs/heads/main/pitch-black-cover.png"
 IMAGE_BASE_URL = "https://raw.githubusercontent.com/OPER8TOR-SHADOW/ops-ebay-images/main/cards/ME5"
 
+
+def emit_csv_progress(processed, total, current_card):
+    print(f"[CSV] {processed}/{total}", flush=True)
+    print(f"CURRENT={current_card}", flush=True)
+
 PARENT_GAME = "Pokémon TCG"
 PARENT_SET = "Pitch Black"
 PARENT_CARD_TYPE = "Pokemon"
@@ -260,6 +265,8 @@ def create_children(cards, header, cols):
 def export_cards(cards, output_path=OUTPUT, title_override=None):
     header, cols = load_template()
     cards = list(cards or [])
+    total_cards = len(cards)
+    processed_cards = 0
 
     grouped_cards = {}
     for card in cards:
@@ -277,7 +284,10 @@ def export_cards(cards, output_path=OUTPUT, title_override=None):
             set_field(parent, cols, "Title", str(group_title))
 
         rows.append(parent)
-        rows.extend(create_children(group_cards, header, cols))
+        for card in group_cards:
+            processed_cards += 1
+            emit_csv_progress(processed_cards, total_cards, variation_label(card))
+            rows.append(create_child(card, header, cols))
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)

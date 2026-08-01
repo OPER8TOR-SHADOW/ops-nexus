@@ -53,8 +53,11 @@ class BuildPage(ctk.CTkFrame):
             "images_uploaded": 0,
             "images_skipped": 0,
             "upload_failures": 0,
+            "download_failures": 0,
             "csv_generated": False,
             "csv_output": "output/Ebay_Variation_Upload.csv",
+            "csv_rows_processed": 0,
+            "csv_rows_total": 0,
             "failed_stage": None,
             "error_message": "",
         }
@@ -274,36 +277,54 @@ class BuildPage(ctk.CTkFrame):
                 status=event.get("status"),
                 progress_text=event.get("progress"),
                 operation_text=event.get("operation"),
+                progress_value=event.get("progress_value"),
             )
             return
 
         if event_type == "stage_detail":
             progress_text = event.get("progress")
             operation_text = event.get("operation")
+            progress_value = event.get("progress_value")
 
             if stage == "upload":
                 uploaded = event.get("uploaded", self.metrics["images_uploaded"])
                 skipped = event.get("skipped", self.metrics["images_skipped"])
                 failed = event.get("failed", self.metrics["upload_failures"])
+                current_file = event.get("current_file", "--")
                 operation_text = (
-                    f"Uploaded: {uploaded}\n"
-                    f"Skipped: {skipped}\n"
-                    f"Failed: {failed}\n"
-                    f"{event.get('operation', 'Current: --')}"
+                    f"Current File:\n{current_file}\n\n"
+                    f"Uploaded:\n{uploaded}\n\n"
+                    f"Skipped:\n{skipped}\n\n"
+                    f"Failed:\n{failed}"
                 )
+                if progress_text:
+                    progress_text = f"Progress:\n{progress_text}"
 
-            if stage == "download" and progress_text:
-                progress_text = f"Progress: {progress_text}"
-            elif stage == "upload" and progress_text:
-                progress_text = f"Progress: {progress_text}"
-            elif stage == "csv" and not progress_text:
-                progress_text = "Progress: Running"
+            elif stage == "download":
+                current_file = event.get("operation", "Current: --")
+                if current_file.startswith("Current: "):
+                    current_file = current_file.split(": ", 1)[1]
+                operation_text = f"Current:\n{current_file}"
+                if progress_text:
+                    progress_text = f"Progress:\n{progress_text}"
+
+            elif stage == "csv":
+                current_card = event.get("current_file")
+                if current_card:
+                    operation_text = f"Current:\n{current_card}"
+                elif operation_text and operation_text.startswith("Current: "):
+                    operation_text = operation_text.replace("Current: ", "Current:\n", 1)
+                if progress_text:
+                    progress_text = f"Progress:\n{progress_text}"
+                elif not progress_text:
+                    progress_text = "Progress:\nRunning"
 
             self.progress.update_stage(
                 stage,
                 status="Running",
                 progress_text=progress_text,
                 operation_text=operation_text,
+                progress_value=progress_value,
             )
 
     # ======================================================
@@ -330,12 +351,13 @@ class BuildPage(ctk.CTkFrame):
             self.progress.set_overall_status("Complete")
             self.progress.update_stage("download", status="Complete")
             self.progress.update_stage("upload", status="Complete")
-            self.progress.update_stage("csv", status="Complete", operation_text="Current: Saving CSV...")
+            self.progress.update_stage("csv", status="Complete", operation_text="Current:\nSaving CSV...", progress_value=1.0)
             self.progress.update_stage(
                 "complete",
                 status="Complete",
-                progress_text="Progress: Complete",
+                progress_text="Progress:\nComplete",
                 operation_text="Build finished successfully.",
+                progress_value=1.0,
             )
             self.current_stage = "complete"
 
@@ -358,6 +380,7 @@ class BuildPage(ctk.CTkFrame):
                 status="Waiting",
                 progress_text="Progress: --",
                 operation_text="Current: Build did not complete.",
+                progress_value=0,
             )
 
             self.log("", "ERROR")
@@ -436,8 +459,11 @@ class BuildPage(ctk.CTkFrame):
             "images_uploaded": 0,
             "images_skipped": 0,
             "upload_failures": 0,
+            "download_failures": 0,
             "csv_generated": False,
             "csv_output": "output/Ebay_Variation_Upload.csv",
+            "csv_rows_processed": 0,
+            "csv_rows_total": 0,
             "failed_stage": None,
             "error_message": "",
         }
@@ -506,6 +532,10 @@ class BuildPage(ctk.CTkFrame):
             "duration_seconds": int(duration_seconds),
             "duration_text": self._format_compact_duration(duration_seconds),
             "cards": int(self.metrics.get("cards_processed", 0) or 0),
+            "uploaded": int(self.metrics.get("images_uploaded", 0) or 0),
+            "skipped": int(self.metrics.get("images_skipped", 0) or 0),
+            "failed": int(self.metrics.get("upload_failures", 0) or 0),
+            "csv_generated": bool(self.metrics.get("csv_generated")),
             "result": "Success" if succeeded else "Failed",
         }
 

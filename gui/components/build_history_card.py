@@ -99,7 +99,15 @@ class BuildHistoryCard(ctk.CTkFrame):
 
         details = ctk.CTkLabel(
             row,
-            text=f"{cards} Cards\n{duration}\n{date_label}",
+            text=(
+                f"{cards} Cards\n"
+                f"{duration}\n"
+                f"Uploaded {int(entry.get('uploaded', 0) or 0)}  "
+                f"Skipped {int(entry.get('skipped', 0) or 0)}  "
+                f"Failed {int(entry.get('failed', 0) or 0)}\n"
+                f"CSV {'Yes' if entry.get('csv_generated') else 'No'}\n"
+                f"{date_label}"
+            ),
             text_color=SUBTEXT,
             justify="left",
             font=(FONT, 12),

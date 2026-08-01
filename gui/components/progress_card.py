@@ -231,8 +231,13 @@ class ProgressCard(ctk.CTkFrame):
             text_color=SUBTEXT,
             font=(FONT, 12),
             anchor="w",
+            justify="left",
         )
         progress_label.pack(anchor="w", padx=12, pady=(0, 2))
+
+        progress_bar = ctk.CTkProgressBar(row, height=10)
+        progress_bar.pack(fill="x", padx=12, pady=(0, 8))
+        progress_bar.set(0)
 
         operation_label = ctk.CTkLabel(
             row,
@@ -248,6 +253,7 @@ class ProgressCard(ctk.CTkFrame):
             "row": row,
             "badge": badge,
             "progress": progress_label,
+            "progress_bar": progress_bar,
             "operation": operation_label,
         }
 
@@ -286,6 +292,7 @@ class ProgressCard(ctk.CTkFrame):
             stage["row"].configure(border_color=BORDER)
             stage["badge"].set_status("Waiting", SUCCESS)
             stage["progress"].configure(text="Progress: --", text_color=SUBTEXT)
+            stage["progress_bar"].set(0)
             stage["operation"].configure(text="Current: Waiting...", text_color=SUBTEXT)
 
         self.hide_summary()
@@ -301,7 +308,7 @@ class ProgressCard(ctk.CTkFrame):
 
     # --------------------------------
 
-    def update_stage(self, stage_key, status=None, progress_text=None, operation_text=None, error_text=None):
+    def update_stage(self, stage_key, status=None, progress_text=None, operation_text=None, error_text=None, progress_value=None):
 
         stage = self.stage_widgets.get(stage_key)
 
@@ -327,8 +334,11 @@ class ProgressCard(ctk.CTkFrame):
         if progress_text is not None:
             stage["progress"].configure(text=progress_text)
 
+        if progress_value is not None:
+            stage["progress_bar"].set(max(0, min(1, progress_value)))
+
         if operation_text is not None:
-            stage["operation"].configure(text=operation_text)
+            stage["operation"].configure(text=operation_text, text_color=SUBTEXT)
 
         if error_text:
             stage["operation"].configure(text=f"Error: {error_text}", text_color=ERROR)

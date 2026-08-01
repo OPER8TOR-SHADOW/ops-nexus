@@ -30,6 +30,14 @@ HEADERS = {
 }
 
 
+def emit_upload_progress(index, total, file_name, uploaded, skipped, failed):
+    print(f"[UPLOAD] {index}/{total}", flush=True)
+    print(f"FILE={file_name}", flush=True)
+    print(f"UPLOADED={uploaded}", flush=True)
+    print(f"SKIPPED={skipped}", flush=True)
+    print(f"FAILED={failed}", flush=True)
+
+
 # ==========================================================
 # Upload One File
 # ==========================================================
@@ -137,8 +145,6 @@ def upload_folder(set_id):
 
     for index, image in enumerate(images, start=1):
 
-        print(f"[{index}/{total}] ", end="")
-
         result = upload_file(image, remote_folder)
 
         if result == "uploaded":
@@ -147,6 +153,15 @@ def upload_folder(set_id):
             skipped += 1
         else:
             failed += 1
+
+        emit_upload_progress(
+            index,
+            total,
+            image.name,
+            uploaded,
+            skipped,
+            failed,
+        )
 
     print()
     print("=" * 60)
