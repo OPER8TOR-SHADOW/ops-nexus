@@ -38,6 +38,8 @@ class DatabaseService:
 
     def __init__(self):
         self.db = DatabaseRepository()
+        self._ensure_sets_columns()
+        self._normalize_set_aliases()
         self._ensure_finish_workspace_columns()
         self.initialize_finish_workspace()
         self.upload_queue = []
@@ -45,6 +47,64 @@ class DatabaseService:
         self.upload_processing = False
         self.upload_cancel_requested = False
         self.ebay_cancel_requested = False
+
+    def _ensure_sets_columns(self):
+        existing_columns = {
+            str(row["name"])
+            for row in self.db.fetchall("PRAGMA table_info(sets)")
+        }
+
+        if "api_set" not in existing_columns:
+            self.db.execute("ALTER TABLE sets ADD COLUMN api_set TEXT")
+
+        # Backfill legacy rows so build modules can resolve API set ids from DB.
+        self.db.execute(
+            """
+            UPDATE sets
+            SET api_set = LOWER(id)
+            WHERE api_set IS NULL OR TRIM(api_set) = ''
+            """
+        )
+
+    def _normalize_set_aliases(self):
+        rows = [dict(row) for row in self.db.fetchall(
+            """
+            SELECT id, name, api_set
+            FROM sets
+            ORDER BY release_date DESC, id ASC
+            """
+        )]
+
+        groups = {}
+        for row in rows:
+            api_set = str(row.get("api_set") or row.get("id") or "").strip().lower()
+            if not api_set:
+                continue
+            groups.setdefault(api_set, []).append(row)
+
+        for api_set, group in groups.items():
+            if len(group) < 2:
+                continue
+
+            canonical = next(
+                (row for row in group if str(row.get("id") or "").strip().lower() != api_set),
+                group[0],
+            )
+            canonical_id = str(canonical.get("id") or "").strip().lower()
+
+            for row in group:
+                current_id = str(row.get("id") or "").strip().lower()
+                if not current_id or current_id == canonical_id:
+                    continue
+
+                self.db.execute(
+                    "UPDATE cards SET set_id = ? WHERE LOWER(set_id) = LOWER(?)",
+                    (canonical_id, current_id),
+                )
+                self.db.execute(
+                    "DELETE FROM sets WHERE LOWER(id) = LOWER(?)",
+                    (current_id,),
+                )
 
     def _ensure_finish_workspace_columns(self):
         existing_columns = {
@@ -78,8 +138,8 @@ class DatabaseService:
         self.db.execute(
             """
             INSERT OR REPLACE INTO sets
-            (id, name, series, release_date, printed_total)
-            VALUES (?, ?, ?, ?, ?)
+            (id, name, series, release_date, printed_total, api_set)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 set_data["id"],
@@ -87,18 +147,135 @@ class DatabaseService:
                 set_data.get("series"),
                 set_data.get("releaseDate"),
                 set_data.get("printedTotal"),
+                str(set_data.get("api_set") or set_data.get("id") or "").strip().lower(),
             ),
         )
+
+    def delete_set(self, set_id):
+        normalized_set_id = str(set_id or "").strip().lower()
+        if not normalized_set_id:
+            raise ValueError("Set ID is required")
+
+        connection = self.db.db.connection
+        cursor = connection.cursor()
+
+        try:
+            cursor.execute("BEGIN")
+
+            card_rows = cursor.execute(
+                "SELECT id FROM cards WHERE LOWER(set_id) = LOWER(?)",
+                (normalized_set_id,),
+            ).fetchall()
+            card_ids = [str(row[0]) for row in card_rows]
+
+            finish_ids = []
+            if card_ids:
+                placeholders = ",".join("?" for _ in card_ids)
+                finish_rows = cursor.execute(
+                    f"SELECT id FROM card_finishes WHERE card_id IN ({placeholders})",
+                    card_ids,
+                ).fetchall()
+                finish_ids = [int(row[0]) for row in finish_rows]
+
+            if finish_ids:
+                finish_placeholders = ",".join("?" for _ in finish_ids)
+                cursor.execute(
+                    f"DELETE FROM finish_workspace WHERE finish_id IN ({finish_placeholders})",
+                    finish_ids,
+                )
+
+            if card_ids:
+                card_placeholders = ",".join("?" for _ in card_ids)
+                finish_placeholders = ",".join("?" for _ in finish_ids) if finish_ids else None
+
+                if finish_placeholders:
+                    cursor.execute(
+                        f"DELETE FROM sales WHERE card_id IN ({card_placeholders}) OR finish_id IN ({finish_placeholders})",
+                        [*card_ids, *finish_ids],
+                    )
+                    cursor.execute(
+                        f"DELETE FROM orders WHERE card_id IN ({card_placeholders}) OR finish_id IN ({finish_placeholders})",
+                        [*card_ids, *finish_ids],
+                    )
+                    cursor.execute(
+                        f"DELETE FROM listings WHERE card_id IN ({card_placeholders}) OR finish_id IN ({finish_placeholders})",
+                        [*card_ids, *finish_ids],
+                    )
+                else:
+                    cursor.execute(
+                        f"DELETE FROM sales WHERE card_id IN ({card_placeholders})",
+                        card_ids,
+                    )
+                    cursor.execute(
+                        f"DELETE FROM orders WHERE card_id IN ({card_placeholders})",
+                        card_ids,
+                    )
+                    cursor.execute(
+                        f"DELETE FROM listings WHERE card_id IN ({card_placeholders})",
+                        card_ids,
+                    )
+
+                cursor.execute(
+                    f"DELETE FROM ebay WHERE card_id IN ({card_placeholders})",
+                    card_ids,
+                )
+                cursor.execute(
+                    f"DELETE FROM inventory WHERE card_id IN ({card_placeholders})",
+                    card_ids,
+                )
+                cursor.execute(
+                    f"DELETE FROM card_finishes WHERE card_id IN ({card_placeholders})",
+                    card_ids,
+                )
+                cursor.execute(
+                    f"DELETE FROM cards WHERE id IN ({card_placeholders})",
+                    card_ids,
+                )
+
+            deleted_sets = cursor.execute(
+                "DELETE FROM sets WHERE LOWER(id) = LOWER(?)",
+                (normalized_set_id,),
+            ).rowcount
+
+            connection.commit()
+
+            return {
+                "set_id": normalized_set_id,
+                "deleted_sets": int(deleted_sets or 0),
+                "deleted_cards": len(card_ids),
+                "deleted_finishes": len(finish_ids),
+            }
+        except Exception:
+            connection.rollback()
+            raise
 
     def get_sets(self):
         return self.db.fetchall(
             "SELECT * FROM sets ORDER BY release_date DESC"
         )
 
+    def get_set(self, set_id):
+        return self.db.fetchone(
+            """
+            SELECT
+                id,
+                name,
+                series,
+                release_date,
+                printed_total,
+                COALESCE(NULLIF(TRIM(api_set), ''), id) AS api_set
+            FROM sets
+            WHERE LOWER(id) = LOWER(?)
+            LIMIT 1
+            """,
+            (set_id,),
+        )
+
     # -----------------
     # Cards
     # -----------------
-    def add_card(self, card):
+    def add_card(self, card, set_id_override=None):
+        resolved_set_id = str(set_id_override or card["set"]["id"] or "").strip().lower()
         self.db.execute(
         """
         INSERT OR REPLACE INTO cards
@@ -107,7 +284,7 @@ class DatabaseService:
         """,
         (
             card["id"],
-            card["set"]["id"],
+            resolved_set_id,
             card["number"],
             card["name"],
             card.get("rarity"),
@@ -1101,7 +1278,7 @@ class DatabaseService:
             "progress": self.get_ebay_queue_progress(set_id=set_id),
         }
 
-    def refresh_ebay_queue_status(self, set_id=None, queue_filter="All"):
+    def refresh_ebay_queue_status(self, set_id=None, queue_filter="All", include_eligibility=True):
         queue_rows = self._get_ebay_queue_rows(set_id=set_id)
         entries = []
 
@@ -1110,18 +1287,26 @@ class DatabaseService:
             if not finish_id:
                 continue
 
-            eligibility = self._evaluate_ebay_eligibility(finish_id)
-            readiness = eligibility.get("readiness") or {}
-            github_status = eligibility.get("github_status") or {}
-            reasons = eligibility.get("reasons") or []
+            if include_eligibility:
+                eligibility = self._evaluate_ebay_eligibility(finish_id)
+                readiness = eligibility.get("readiness") or {}
+                github_status = eligibility.get("github_status") or {}
+                reasons = eligibility.get("reasons") or []
+                is_ready = bool(eligibility.get("eligible"))
+                reason_text = "; ".join(reasons) if reasons else ""
+            else:
+                readiness = {}
+                github_status = {}
+                is_ready = None
+                reason_text = ""
 
             entry = {
                 **row,
                 "quantity": int(readiness.get("quantity") or 0),
                 "price": float(readiness.get("sell_price") or 0),
                 "github_status": github_status.get("status") or "Pending",
-                "is_ready": bool(eligibility.get("eligible")),
-                "reason": "; ".join(reasons) if reasons else "",
+                "is_ready": is_ready,
+                "reason": reason_text,
             }
             entries.append(entry)
 
@@ -1725,6 +1910,7 @@ class DatabaseService:
                 s.name,
                 s.series,
                 s.release_date,
+                COALESCE(NULLIF(TRIM(s.api_set), ''), s.id) AS api_set,
                 COUNT(c.id) AS card_count
             FROM sets s
             LEFT JOIN cards c

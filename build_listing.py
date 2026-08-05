@@ -84,7 +84,7 @@ def run_build(selected_set):
 def main():
     if len(sys.argv) != 2:
         print("Usage:")
-        print("python build_listing.py ME5")
+        print("python build_listing.py <SET_ID>")
         sys.exit(1)
 
     run_build(sys.argv[1].upper())

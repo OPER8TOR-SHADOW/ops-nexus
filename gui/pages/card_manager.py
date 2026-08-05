@@ -1,4 +1,6 @@
 import customtkinter as ctk
+import os
+import threading
 from PIL import Image
 from tkinter import filedialog
 
@@ -7,6 +9,7 @@ from gui.theme import *
 
 
 class CardManagerPage(ctk.CTkFrame):
+    MAX_QUEUE_ROWS_RENDER = 80
 
     def __init__(self, master, page_manager=None, selected_set=None):
 
@@ -53,6 +56,13 @@ class CardManagerPage(ctk.CTkFrame):
         }
         self.readiness_value_labels = {}
         self.selected_finish_readiness_label = None
+        self._is_destroyed = False
+        self._readiness_request_id = 0
+        self._pending_initial_select_after_id = None
+        self._pending_detail_sections_after_id = None
+        self._detail_render_token = 0
+        self._suppress_auto_select_once = False
+        self._preview_image_cache = {}
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=2)
@@ -217,10 +227,20 @@ class CardManagerPage(ctk.CTkFrame):
 
     def load_set(self, set_id):
         self.selected_set = set_id
+        self.selected_card = None
+        self.selected_finish_id = None
+        self._suppress_auto_select_once = True
         self.cards = self.db.get_card_workspace(set_id)
-        self.refresh_readiness_cache()
+        self._reset_readiness_cache()
         self.populate_rarity_filter()
         self.refresh_list()
+        self._refresh_readiness_cache_async(set_id)
+
+    def refresh(self):
+        if not self.selected_set:
+            return
+
+        self.load_set(self.selected_set)
 
     def populate_rarity_filter(self):
         rarities = sorted({card.get("rarity") for card in self.cards if card.get("rarity")})
@@ -230,6 +250,7 @@ class CardManagerPage(ctk.CTkFrame):
             self.rarity_var.set("All")
 
     def refresh_list(self):
+        self._cancel_pending_initial_selection()
         self.card_row_headers = {}
         for child in self.card_list.winfo_children():
             child.destroy()
@@ -302,51 +323,21 @@ class CardManagerPage(ctk.CTkFrame):
                 text_color=TEXT,
             ).pack(anchor="w", padx=(8, 0))
 
-            ctk.CTkLabel(
-                left,
-                text=f"{card.get('rarity') or 'Unknown'}",
-                font=(FONT, 11),
-                text_color=MUTED,
-            ).pack(anchor="w", pady=(4, 0))
-
-            right = ctk.CTkFrame(body, fg_color="transparent")
-            right.pack(side="right", anchor="n")
-
             card_readiness = self.readiness_by_card.get(self._card_identifier(card), {})
             ready_count = int(card_readiness.get("ready", 0) or 0)
             total_count = int(card_readiness.get("total", 0) or 0)
-            readiness_text = f"Ready: {ready_count}/{total_count}" if total_count > 0 else "Ready: 0/0"
-            readiness_color = SUCCESS if total_count > 0 and ready_count == total_count else WARNING
+            readiness_text = f"Ready {ready_count}/{total_count}" if total_count > 0 else "Ready 0/0"
 
             ctk.CTkLabel(
-                right,
-                text=readiness_text,
-                font=(FONT, 12, "bold"),
-                text_color=readiness_color,
-            ).pack(anchor="e", pady=(0, 2))
-
-            ctk.CTkLabel(
-                right,
-                text=f"Inventory: {card.get('inventory_quantity', 0)}",
-                font=(FONT, 12),
-                text_color=SUBTEXT,
-            ).pack(anchor="e")
-
-            status = build_workflow_status(card)
-            badges = ctk.CTkFrame(right, fg_color="transparent")
-            badges.pack(anchor="e", pady=(6, 0))
-
-            # compact badges
-            if status.get("imported"):
-                ctk.CTkLabel(badges, text="Imported", font=(FONT, 10, "bold"), fg_color=SUBTEXT, text_color=TEXT, corner_radius=8, padx=8, pady=2).pack(side="right", padx=(6, 0))
-            if status.get("images"):
-                ctk.CTkLabel(badges, text="Images", font=(FONT, 10), fg_color=SUBTEXT, text_color=TEXT, corner_radius=8, padx=8, pady=2).pack(side="right", padx=(6, 0))
-            if status.get("inventory"):
-                ctk.CTkLabel(badges, text="Inventory", font=(FONT, 10), fg_color=SUBTEXT, text_color=TEXT, corner_radius=8, padx=8, pady=2).pack(side="right", padx=(6, 0))
-            if status.get("pricing"):
-                ctk.CTkLabel(badges, text="Pricing", font=(FONT, 10), fg_color=SUBTEXT, text_color=TEXT, corner_radius=8, padx=8, pady=2).pack(side="right", padx=(6, 0))
-            if status.get("ebay"):
-                ctk.CTkLabel(badges, text="eBay", font=(FONT, 10), fg_color=SUBTEXT, text_color=TEXT, corner_radius=8, padx=8, pady=2).pack(side="right", padx=(6, 0))
+                left,
+                text=(
+                    f"{card.get('rarity') or 'Unknown'} | "
+                    f"Inventory {card.get('inventory_quantity', 0)} | "
+                    f"{readiness_text}"
+                ),
+                font=(FONT, 11),
+                text_color=MUTED,
+            ).pack(anchor="w", pady=(4, 0), padx=(8, 0))
 
             self._bind_card_row_click(row, card)
 
@@ -357,14 +348,66 @@ class CardManagerPage(ctk.CTkFrame):
             except Exception:
                 pass
 
+        should_select_first = False
         if self.selected_card is None:
-            self.select_card(self.display_cards[0])
+            should_select_first = True
         else:
             current_ids = {self._card_identifier(card) for card in self.display_cards}
             if self._card_identifier(self.selected_card) not in current_ids:
-                self.select_card(self.display_cards[0])
+                self.selected_card = None
+                should_select_first = True
             else:
                 self._update_card_selection_highlight()
+
+        if should_select_first:
+            if self._suppress_auto_select_once:
+                self._suppress_auto_select_once = False
+                self._show_select_card_prompt()
+            else:
+                self._schedule_initial_card_selection()
+
+    def _schedule_initial_card_selection(self):
+        self._cancel_pending_initial_selection()
+
+        if not self.display_cards:
+            return
+
+        try:
+            self._pending_initial_select_after_id = self.after(1, self._select_first_visible_card)
+        except Exception:
+            self._pending_initial_select_after_id = None
+
+    def _select_first_visible_card(self):
+        self._pending_initial_select_after_id = None
+
+        if self._is_destroyed or not self.display_cards:
+            return
+
+        if self.selected_card is not None:
+            return
+
+        self.select_card(self.display_cards[0])
+
+    def _cancel_pending_initial_selection(self):
+        if self._pending_initial_select_after_id is None:
+            return
+
+        try:
+            self.after_cancel(self._pending_initial_select_after_id)
+        except Exception:
+            pass
+        self._pending_initial_select_after_id = None
+
+    def _show_select_card_prompt(self):
+        for child in self.detail_container.winfo_children():
+            child.destroy()
+
+        ctk.CTkLabel(
+            self.detail_container,
+            text="Select a card to load details.",
+            font=(FONT, 16, "bold"),
+            text_color=TEXT,
+        ).pack(anchor="w", padx=18, pady=18)
 
     def sort_cards(self, cards, sort_key):
         def sort_value(card):
@@ -407,6 +450,10 @@ class CardManagerPage(ctk.CTkFrame):
                 header.configure(border_width=1, border_color=BORDER)
 
     def render_detail(self, card):
+        self._detail_render_token += 1
+        render_token = self._detail_render_token
+        self._cancel_pending_detail_sections()
+
         self.preview_image_ref = None
         for child in self.detail_container.winfo_children():
             child.destroy()
@@ -559,6 +606,30 @@ class CardManagerPage(ctk.CTkFrame):
         self.add_image_workspace_section(content, image_info)
         self.add_inventory_section(content, card)
         self.add_pricing_section(content, card)
+        try:
+            self._pending_detail_sections_after_id = self.after(
+                1,
+                lambda c=content, selected=card, token=render_token: self._render_deferred_sections(c, selected, token),
+            )
+        except Exception:
+            self._pending_detail_sections_after_id = None
+            self._render_deferred_sections(content, card, render_token)
+
+    def _render_deferred_sections(self, content, card, render_token):
+        self._pending_detail_sections_after_id = None
+
+        if self._is_destroyed:
+            return
+
+        if render_token != self._detail_render_token:
+            return
+
+        try:
+            if not content.winfo_exists():
+                return
+        except Exception:
+            return
+
         self.add_github_section(content, card)
         self.add_ebay_queue_section(content, card)
 
@@ -571,6 +642,17 @@ class CardManagerPage(ctk.CTkFrame):
                 ("Listing ID", card.get("listing_id") or "Pending"),
             ],
         )
+
+    def _cancel_pending_detail_sections(self):
+        if self._pending_detail_sections_after_id is None:
+            return
+
+        try:
+            self.after_cancel(self._pending_detail_sections_after_id)
+        except Exception:
+            pass
+
+        self._pending_detail_sections_after_id = None
 
     def add_inventory_section(self, parent, card):
         section = ctk.CTkFrame(
@@ -909,9 +991,11 @@ class CardManagerPage(ctk.CTkFrame):
             text_color=TEXT,
         ).pack(anchor="w", padx=14, pady=(12, 8))
 
+        include_eligibility = self.ebay_queue_filter in {"Ready", "Not Ready"}
         queue_status = self.db.refresh_ebay_queue_status(
             set_id=self.selected_set,
             queue_filter=self.ebay_queue_filter,
+            include_eligibility=include_eligibility,
         )
         progress = queue_status.get("progress", {})
         summary = queue_status.get("summary", {})
@@ -1114,7 +1198,9 @@ class CardManagerPage(ctk.CTkFrame):
         table_body.pack(fill="both", expand=True)
         self.ebay_queue_table_frame = table_body
 
-        for row in queue_rows:
+        display_rows = queue_rows[: self.MAX_QUEUE_ROWS_RENDER]
+
+        for row in display_rows:
             item = ctk.CTkFrame(table_body, fg_color="transparent")
             item.pack(fill="x", pady=2)
 
@@ -1140,6 +1226,15 @@ class CardManagerPage(ctk.CTkFrame):
                     justify="left",
                     wraplength=width + 20,
                 ).pack(side="left", padx=(8, 0), pady=3)
+
+        hidden_count = max(0, len(queue_rows) - len(display_rows))
+        if hidden_count > 0:
+            ctk.CTkLabel(
+                table_section,
+                text=f"Showing first {len(display_rows)} rows. {hidden_count} additional rows hidden for performance.",
+                font=(FONT, 11),
+                text_color=MUTED,
+            ).pack(anchor="w", pady=(6, 0))
 
     def add_image_workspace_section(self, parent, image_info):
         section = ctk.CTkFrame(
@@ -1312,6 +1407,17 @@ class CardManagerPage(ctk.CTkFrame):
         if not image_path:
             return None
 
+        cache_key = None
+        try:
+            resolved_path = os.path.abspath(str(image_path))
+            mtime = os.path.getmtime(resolved_path)
+            cache_key = (resolved_path, int(max_width), int(max_height), float(mtime))
+            cached = self._preview_image_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        except Exception:
+            cache_key = None
+
         try:
             image = Image.open(image_path)
             image = image.convert("RGBA")
@@ -1322,7 +1428,10 @@ class CardManagerPage(ctk.CTkFrame):
             scale = min(max_width / width, max_height / height)
             resized_size = (max(1, int(width * scale)), max(1, int(height * scale)))
             resized = image.resize(resized_size, Image.Resampling.LANCZOS)
-            return ctk.CTkImage(light_image=resized, dark_image=resized, size=resized_size)
+            preview = ctk.CTkImage(light_image=resized, dark_image=resized, size=resized_size)
+            if cache_key is not None:
+                self._preview_image_cache[cache_key] = preview
+            return preview
         except Exception:
             return None
 
@@ -1479,27 +1588,73 @@ class CardManagerPage(ctk.CTkFrame):
 
     def refresh_readiness_cache(self):
         if not self.selected_set:
-            self.readiness_rows = []
-            self.readiness_by_finish = {}
-            self.readiness_by_card = {}
-            self.readiness_summary = {
-                "total_finishes": 0,
-                "ready": 0,
-                "missing_inventory": 0,
-                "missing_pricing": 0,
-                "missing_images": 0,
-                "ready_for_publishing": 0,
-            }
+            self._reset_readiness_cache()
             self._update_readiness_dashboard()
             self._update_selected_finish_readiness_badge()
             return
 
         rows = self.db.get_set_readiness(self.selected_set)
-        self.readiness_rows = rows
-        self.readiness_by_finish = {row.get("finish_id"): row for row in rows}
+        summary = self.db.calculate_readiness_summary(self.selected_set, readiness_rows=rows)
+        self._set_readiness_data(rows, summary)
+        self._update_readiness_dashboard()
+        self._update_selected_finish_readiness_badge()
+
+    def _refresh_readiness_cache_async(self, set_id):
+        if not set_id:
+            return
+
+        self._readiness_request_id += 1
+        request_id = self._readiness_request_id
+
+        def worker():
+            local_db = DatabaseService()
+            try:
+                rows = local_db.get_set_readiness(set_id)
+                summary = local_db.calculate_readiness_summary(set_id, readiness_rows=rows)
+                error = None
+            except Exception as exc:
+                rows = []
+                summary = None
+                error = exc
+            finally:
+                local_db.close()
+
+            try:
+                self.after(0, lambda: self._apply_async_readiness(request_id, set_id, rows, summary, error))
+            except Exception:
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_async_readiness(self, request_id, set_id, rows, summary, error):
+        if self._is_destroyed:
+            return
+
+        if request_id != self._readiness_request_id:
+            return
+
+        if str(set_id or "") != str(self.selected_set or ""):
+            return
+
+        if error is not None:
+            return
+
+        self._set_readiness_data(rows, summary)
+        self._update_readiness_dashboard()
+        self._update_selected_finish_readiness_badge()
+
+        try:
+            if self.winfo_ismapped():
+                self.refresh_list()
+        except Exception:
+            self.refresh_list()
+
+    def _set_readiness_data(self, rows, summary):
+        self.readiness_rows = list(rows or [])
+        self.readiness_by_finish = {row.get("finish_id"): row for row in self.readiness_rows}
 
         by_card = {}
-        for row in rows:
+        for row in self.readiness_rows:
             card_id = row.get("card_id")
             if not card_id:
                 continue
@@ -1526,9 +1681,23 @@ class CardManagerPage(ctk.CTkFrame):
                 card_summary["missing_images"] += 1
 
         self.readiness_by_card = by_card
-        self.readiness_summary = self.db.calculate_readiness_summary(self.selected_set, readiness_rows=rows)
-        self._update_readiness_dashboard()
-        self._update_selected_finish_readiness_badge()
+        self.readiness_summary = dict(summary or self._empty_readiness_summary())
+
+    def _reset_readiness_cache(self):
+        self.readiness_rows = []
+        self.readiness_by_finish = {}
+        self.readiness_by_card = {}
+        self.readiness_summary = self._empty_readiness_summary()
+
+    def _empty_readiness_summary(self):
+        return {
+            "total_finishes": 0,
+            "ready": 0,
+            "missing_inventory": 0,
+            "missing_pricing": 0,
+            "missing_images": 0,
+            "ready_for_publishing": 0,
+        }
 
     def _update_readiness_dashboard(self):
         for key, label in self.readiness_value_labels.items():
@@ -1618,12 +1787,11 @@ class CardManagerPage(ctk.CTkFrame):
             text_color=text_color,
         )
 
-    def _refresh_after_inventory_save(self):
-        self.cards = self.db.get_card_workspace(self.selected_set)
-        self.populate_rarity_filter()
-        self.refresh_list()
-
     def show_empty_state(self):
+        self._cancel_pending_initial_selection()
+        self._cancel_pending_detail_sections()
+        self.selected_card = None
+
         for child in self.card_list.winfo_children():
             child.destroy()
 
@@ -1698,6 +1866,12 @@ class CardManagerPage(ctk.CTkFrame):
             self.page_manager.show_set_manager()
 
     def destroy(self):
+        self._is_destroyed = True
+        self._readiness_request_id += 1
+        self._cancel_pending_initial_selection()
+        self._cancel_pending_detail_sections()
+        self._preview_image_cache.clear()
+
         if getattr(self, "db", None) is not None:
             self.db.close()
         super().destroy()

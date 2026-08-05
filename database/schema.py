@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS sets (
     name TEXT NOT NULL,
     series TEXT,
     release_date TEXT,
-    printed_total INTEGER
+    printed_total INTEGER,
+    api_set TEXT
 );
 
 CREATE TABLE IF NOT EXISTS cards (

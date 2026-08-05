@@ -1,4 +1,5 @@
 import csv
+import sys
 from builtins import (
     FileNotFoundError,
     PermissionError,
@@ -15,7 +16,13 @@ from builtins import (
     str,
 )
 from pathlib import Path
+
 from openpyxl import load_workbook
+
+from config import GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH
+from listing_utils import get_listing_variants
+from pokemon_api import get_cards
+from sets import get_set_config_by_id
 
 # ==========================================================
 # OPS COLLECTABLES
@@ -28,14 +35,13 @@ from openpyxl import load_workbook
 
 TEMPLATE = "templates/Carduploader csv template.csv"
 INVENTORY = "inventory/OPS_Inventory.xlsx"
-OUTPUT = "output/Ebay_Variation_Upload.csv"
+OUTPUT_DIR = "output"
 
 # -----------------------------
 # LISTING SETTINGS
 # -----------------------------
 
-TITLE = "Pokemon TCG Pitch Black Bulk Singles - C, RH, HR"
-DESCRIPTION = "{Perfect Order}Thanks for viewing my listing!"
+DESCRIPTION = "Thanks for viewing my listing!"
 CATEGORY = "183454"
 LOCATION = "AUS"
 
@@ -46,8 +52,6 @@ CARD_CONDITION_LABEL = "Near Mint or Better:"
 PAYMENT_PROFILE = "BUY IT NOW"
 RETURN_PROFILE = "30 DAY RETURN BP"
 SHIPPING_PROFILE = "FREE POSTAGE"
-COVER_IMAGE_URL = "https://raw.githubusercontent.com/OPER8TOR-SHADOW/ops-ebay-images/refs/heads/main/pitch-black-cover.png"
-IMAGE_BASE_URL = "https://raw.githubusercontent.com/OPER8TOR-SHADOW/ops-ebay-images/main/cards/ME5"
 
 
 def emit_csv_progress(processed, total, current_card):
@@ -55,7 +59,6 @@ def emit_csv_progress(processed, total, current_card):
     print(f"CURRENT={current_card}", flush=True)
 
 PARENT_GAME = "Pokémon TCG"
-PARENT_SET = "Pitch Black"
 PARENT_CARD_TYPE = "Pokemon"
 PARENT_MANUFACTURER = "The Pokémon Company"
 PARENT_GRADED = "No"
@@ -116,17 +119,22 @@ def format_price(price):
     return f"{price_value:.2f}".rstrip("0").rstrip(".")
 
 
-def load_inventory():
+def load_inventory(selected_set):
     workbook = load_workbook(INVENTORY, data_only=True)
     sheet = workbook.active
     cards = []
+    selected_prefix = str(selected_set or "").upper()
 
     for row in sheet.iter_rows(min_row=2, values_only=True):
         if not row or not row[0]:
             continue
 
+        sku = str(row[0]).strip() if row[0] else ""
+        if selected_prefix and not sku.upper().startswith(f"{selected_prefix}-"):
+            continue
+
         cards.append({
-            "sku": str(row[0]).strip(),
+            "sku": sku,
             "name": str(row[1]).strip() if row[1] else "",
             "set": str(row[2]).strip() if row[2] else "",
             "number": str(row[3]).strip() if row[3] else "",
@@ -138,6 +146,40 @@ def load_inventory():
         })
 
     return cards
+
+
+def load_cards_from_api(set_context):
+    cards = []
+    api_cards = get_cards(set_context["api_set"])
+
+    for card in api_cards:
+        listing = get_listing_variants(card, set_context["id"])
+
+        for variant in listing["variants"]:
+            cards.append({
+                "sku": variant["sku"],
+                "name": listing["name"],
+                "set": listing["set_name"],
+                "number": listing["number"],
+                "finish": variant["finish"],
+                "rarity": listing["rarity"],
+                "qty": "1",
+                "price": variant["price"],
+                "image": variant["image"],
+            })
+
+    return cards
+
+
+def load_cards_for_export(set_context):
+    inventory_path = Path(INVENTORY)
+
+    if inventory_path.exists():
+        inventory_cards = load_inventory(set_context["id"])
+        if inventory_cards:
+            return inventory_cards
+
+    return load_cards_from_api(set_context)
 
 
 def variation_label(card):
@@ -175,25 +217,74 @@ def get_parent_custom_label(cards):
     return sku.split("-")[0].lower() if sku else ""
 
 
+def build_output_path(set_context):
+
+    return str(Path(OUTPUT_DIR) / f"{set_context['id'].upper()}_Ebay_Variation_Upload.csv")
+
+
+def build_image_base_url(set_context):
+
+    return (
+        f"https://raw.githubusercontent.com/"
+        f"{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/"
+        f"cards/{set_context['id'].upper()}"
+    )
+
+
+def build_listing_title(set_context):
+
+    return f"Pokemon TCG {set_context['name']} Bulk Singles - C, RH, HR"
+
+
+def build_github_image_url(set_context, filename):
+
+    filename = str(filename or "").strip()
+
+    if not filename:
+        return ""
+
+    if filename.startswith("http"):
+        return filename
+
+    image_base_url = build_image_base_url(set_context)
+
+    return image_base_url.rstrip("/") + "/" + filename
+
+
+def build_cover_image_url(cards, set_context):
+
+    if not cards:
+        return ""
+
+    for card in cards:
+        image_url = build_github_image_url(set_context, card.get("image"))
+
+        if image_url:
+            return image_url
+
+    return ""
+
+
 # ==========================================================
 # PARENT LISTING
 # ==========================================================
 
 
-def create_parent(cards, header, cols):
+def create_parent(cards, header, cols, set_context):
     parent = blank_row(header)
+    cover_image_url = build_cover_image_url(cards, set_context)
 
     set_field(parent, cols, "Action(SiteID=AU|Country=AU|Currency=AUD|Version=1193|CC=UTF-8)", "Add")
     set_field(parent, cols, "Relationship", "")
     set_field(parent, cols, "Relationship details", "Card=" + ";".join(variation_label(card) for card in cards))
     set_field(parent, cols, "CustomLabel", get_parent_custom_label(cards))
     set_field(parent, cols, "Category", CATEGORY)
-    set_field(parent, cols, "Title", TITLE)
+    set_field(parent, cols, "Title", build_listing_title(set_context))
     set_field(parent, cols, "ConditionID", CONDITION_ID)
     set_field(parent, cols, "CD:Card Condition - (ID: 40001)", CARD_CONDITION)
     set_field(parent, cols, "C:Card Condition", CARD_CONDITION_LABEL)
     set_field(parent, cols, "C:Game", PARENT_GAME)
-    set_field(parent, cols, "PicURL", COVER_IMAGE_URL)
+    set_field(parent, cols, "PicURL", cover_image_url)
     set_field(parent, cols, "Description", DESCRIPTION)
     set_field(parent, cols, "Format", "FixedPrice")
     set_field(parent, cols, "Duration", "GTC")
@@ -201,7 +292,7 @@ def create_parent(cards, header, cols):
     set_field(parent, cols, "PaymentProfileName", PAYMENT_PROFILE)
     set_field(parent, cols, "ReturnProfileName", RETURN_PROFILE)
     set_field(parent, cols, "Location", LOCATION)
-    set_field(parent, cols, "C:Set", PARENT_SET)
+    set_field(parent, cols, "C:Set", set_context["name"])
     set_field(parent, cols, "C:Card Type", PARENT_CARD_TYPE)
     set_field(parent, cols, "C:Manufacturer", PARENT_MANUFACTURER)
     set_field(parent, cols, "C:Graded", PARENT_GRADED)
@@ -224,7 +315,7 @@ def create_parent(cards, header, cols):
 # ==========================================================
 
 
-def create_child(card, header, cols):
+def create_child(card, header, cols, set_context):
     child = blank_row(header)
 
     set_field(child, cols, "Action(SiteID=AU|Country=AU|Currency=AUD|Version=1193|CC=UTF-8)", "Add")
@@ -235,18 +326,7 @@ def create_child(card, header, cols):
     set_field(child, cols, "Quantity", card["qty"])
 
     if card["image"]:
-        filename = card["image"].strip()
-
-        # GitHub stores normal cards without "-N"
-        if filename.endswith("-N.png"):
-            filename = filename[:-6] + ".png"
-
-        # If inventory only stores filenames, prepend the base URL
-        if not filename.startswith("http"):
-            image_url = IMAGE_BASE_URL.rstrip("/") + "/" + filename
-        else:
-            image_url = filename
-
+        image_url = build_github_image_url(set_context, card["image"])
         pic_value = f"{variation_label(card)}={image_url}"
         set_field(child, cols, "PicURL", pic_value)
 
@@ -258,15 +338,16 @@ def create_child(card, header, cols):
 # ==========================================================
 
 
-def create_children(cards, header, cols):
-    return [create_child(card, header, cols) for card in cards]
+def create_children(cards, header, cols, set_context):
+    return [create_child(card, header, cols, set_context) for card in cards]
 
 
-def export_cards(cards, output_path=OUTPUT, title_override=None):
+def export_cards(cards, set_context, output_path=None, title_override=None):
     header, cols = load_template()
     cards = list(cards or [])
     total_cards = len(cards)
     processed_cards = 0
+    output_path = output_path or build_output_path(set_context)
 
     grouped_cards = {}
     for card in cards:
@@ -278,7 +359,7 @@ def export_cards(cards, output_path=OUTPUT, title_override=None):
         if not group_cards:
             continue
 
-        parent = create_parent(group_cards, header, cols)
+        parent = create_parent(group_cards, header, cols, set_context)
         group_title = title_override or group_cards[0].get("listing_title_override")
         if group_title:
             set_field(parent, cols, "Title", str(group_title))
@@ -287,7 +368,7 @@ def export_cards(cards, output_path=OUTPUT, title_override=None):
         for card in group_cards:
             processed_cards += 1
             emit_csv_progress(processed_cards, total_cards, variation_label(card))
-            rows.append(create_child(card, header, cols))
+            rows.append(create_child(card, header, cols, set_context))
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -308,12 +389,14 @@ def export_cards(cards, output_path=OUTPUT, title_override=None):
 # ==========================================================
 
 
-def export_csv():
-    cards = load_inventory()
+def export_csv(selected_set):
+    set_context = get_set_config_by_id(selected_set)
+    cards = load_cards_for_export(set_context)
+    output_path = build_output_path(set_context)
 
     print(f"Found {len(cards)} cards")
     print("Building variations...")
-    result = export_cards(cards, output_path=OUTPUT)
+    result = export_cards(cards, set_context, output_path=output_path)
     print(f"Created {result.get('cards', 0)} variations")
 
     print()
@@ -321,7 +404,7 @@ def export_csv():
     print("Export Complete!")
     print("====================================")
     print(f"Cards Exported : {result.get('cards', 0)}")
-    print(f"Output File    : {OUTPUT}")
+    print(f"Output File    : {output_path}")
     print()
 
 
@@ -332,7 +415,12 @@ def export_csv():
 
 def main():
     try:
-        export_csv()
+        if len(sys.argv) < 2:
+            print("Usage:")
+            print("python ebay_variation_exporter.py <SET_ID>")
+            return
+
+        export_csv(sys.argv[1])
 
     except FileNotFoundError as e:
         print()

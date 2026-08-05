@@ -10,6 +10,10 @@ HEADERS = {
 
 PAGE_SIZE = 250
 MAX_RETRIES = 5
+SETS_CACHE_TTL_SECONDS = 15 * 60
+
+_SETS_CACHE = None
+_SETS_CACHE_TS = 0.0
 
 
 def request_json(url):
@@ -104,8 +108,37 @@ def get_set(set_id):
 def get_all_sets():
     """Return every Pokémon set."""
 
-    url = f"{BASE_URL}/sets?pageSize=250"
+    global _SETS_CACHE, _SETS_CACHE_TS
 
-    data = request_json(url)
+    now = time.time()
+    if _SETS_CACHE and (now - _SETS_CACHE_TS) <= SETS_CACHE_TTL_SECONDS:
+        return list(_SETS_CACHE)
 
-    return data["data"]
+    page = 1
+    all_sets = []
+
+    try:
+        while True:
+            url = f"{BASE_URL}/sets?page={page}&pageSize={PAGE_SIZE}"
+            data = request_json(url)
+
+            batch = data.get("data", [])
+            if not batch:
+                break
+
+            all_sets.extend(batch)
+            total = int(data.get("totalCount") or len(all_sets))
+
+            if len(all_sets) >= total:
+                break
+
+            page += 1
+
+        _SETS_CACHE = list(all_sets)
+        _SETS_CACHE_TS = time.time()
+        return all_sets
+    except Exception:
+        if _SETS_CACHE:
+            print("Using cached set list due to API failure.")
+            return list(_SETS_CACHE)
+        raise

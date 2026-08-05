@@ -1,6 +1,7 @@
 import base64
 import os
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -20,14 +21,8 @@ load_dotenv()
 
 TOKEN = os.getenv("GITHUB_TOKEN")
 
-if not TOKEN:
-    print("ERROR: GITHUB_TOKEN not found.")
-    sys.exit(1)
-
-HEADERS = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Accept": "application/vnd.github+json",
-}
+RETRY_DELAYS_SECONDS = (3, 6, 9)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def emit_upload_progress(index, total, file_name, uploaded, skipped, failed):
@@ -38,11 +33,51 @@ def emit_upload_progress(index, total, file_name, uploaded, skipped, failed):
     print(f"FAILED={failed}", flush=True)
 
 
+def get_headers():
+    token = os.getenv("GITHUB_TOKEN") or TOKEN
+    if not token:
+        raise RuntimeError("GITHUB_TOKEN not found.")
+
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def request_with_retry(method, url, **kwargs):
+    last_response = None
+
+    for attempt, delay in enumerate((0, *RETRY_DELAYS_SECONDS), start=1):
+        if delay:
+            time.sleep(delay)
+
+        try:
+            response = requests.request(method, url, **kwargs)
+            last_response = response
+
+            if response.status_code < 500:
+                return response
+
+            print(
+                f"[RETRY] {method} {url} -> {response.status_code} "
+                f"(attempt {attempt}/{len(RETRY_DELAYS_SECONDS) + 1})"
+            )
+        except requests.Timeout:
+            print(
+                f"[RETRY] {method} timeout "
+                f"(attempt {attempt}/{len(RETRY_DELAYS_SECONDS) + 1})"
+            )
+            last_response = None
+
+    return last_response
+
+
 # ==========================================================
 # Upload One File
 # ==========================================================
 
 def upload_file(file_path: Path, remote_folder: str):
+    headers = get_headers()
 
     remote_path = f"{remote_folder}/{file_path.name}"
 
@@ -52,11 +87,16 @@ def upload_file(file_path: Path, remote_folder: str):
     )
 
     try:
-        response = requests.get(
+        response = request_with_retry(
+            "GET",
             url,
-            headers=HEADERS,
+            headers=headers,
             timeout=20,
         )
+
+        if response is None:
+            print(f"[TIMEOUT] {file_path.name}")
+            return "failed"
 
         if response.status_code == 200:
             print(f"[SKIP] {file_path.name}")
@@ -76,16 +116,33 @@ def upload_file(file_path: Path, remote_folder: str):
             "branch": GITHUB_BRANCH,
         }
 
-        response = requests.put(
+        response = request_with_retry(
+            "PUT",
             url,
-            headers=HEADERS,
+            headers=headers,
             json=payload,
             timeout=60,
         )
 
+        if response is None:
+            print(f"[TIMEOUT] {file_path.name}")
+            return "failed"
+
         if response.status_code in (200, 201):
             print(f"[ OK ] {file_path.name}")
             return "uploaded"
+
+        if response.status_code == 409:
+            verify_response = request_with_retry(
+                "GET",
+                url,
+                headers=headers,
+                timeout=20,
+            )
+
+            if verify_response is not None and verify_response.status_code == 200:
+                print(f"[SKIP] {file_path.name}")
+                return "skipped"
 
         print(f"[FAIL] {file_path.name}")
         print(response.status_code)
@@ -106,13 +163,12 @@ def upload_file(file_path: Path, remote_folder: str):
 # Upload Folder
 # ==========================================================
 
-def upload_folder(set_id):
+def upload_folder(set_id, progress_callback=None):
 
-    local_folder = Path("images") / set_id.upper()
+    local_folder = PROJECT_ROOT / "images" / set_id.upper()
 
     if not local_folder.exists():
-        print(f"Folder not found: {local_folder}")
-        return
+        raise RuntimeError(f"Folder not found: {local_folder}")
 
     remote_folder = f"cards/{set_id.upper()}"
 
@@ -163,6 +219,9 @@ def upload_folder(set_id):
             failed,
         )
 
+        if progress_callback is not None:
+            progress_callback(index, total, image.name, uploaded, skipped, failed)
+
     print()
     print("=" * 60)
     print("Upload Complete")
@@ -170,6 +229,13 @@ def upload_folder(set_id):
     print(f"Uploaded : {uploaded}")
     print(f"Skipped  : {skipped}")
     print(f"Failed   : {failed}")
+
+    return {
+        "uploaded": uploaded,
+        "skipped": skipped,
+        "failed": failed,
+        "total": total,
+    }
 
 
 # ==========================================================
@@ -180,10 +246,14 @@ def main():
 
     if len(sys.argv) < 2:
         print("Usage:")
-        print("python github_upload.py ME5")
+        print("python github_upload.py <SET_ID>")
         sys.exit(1)
 
-    upload_folder(sys.argv[1])
+    try:
+        upload_folder(sys.argv[1])
+    except Exception as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

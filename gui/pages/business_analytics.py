@@ -442,6 +442,11 @@ class BusinessAnalyticsPage(ctk.CTkFrame):
         range_label = f"{filters['start_date'] or 'Start'} to {filters['end_date'] or 'Now'}"
         self.status_label.configure(text=f"Updated for {range_label}")
 
+    def refresh(self):
+        self.filter_options = self.service.get_filter_options()
+        self._load_filter_options()
+        self.apply_filters()
+
     def _update_metric_labels(self, labels, values):
         for key, (label, currency) in labels.items():
             value = values.get(key, 0)

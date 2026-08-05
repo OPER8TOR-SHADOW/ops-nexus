@@ -570,6 +570,11 @@ class BuildPage(ctk.CTkFrame):
 
         self.history_card.set_history(self.build_history)
 
+    def refresh(self):
+
+        if hasattr(self, "set_selector") and self.set_selector is not None:
+            self.set_selector.refresh()
+
     # ======================================================
     # Helpers
     # ======================================================

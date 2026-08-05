@@ -52,14 +52,13 @@ class Sidebar(ctk.CTkFrame):
 
         pages = [
             ("🏠 Dashboard", self.page_manager.show_dashboard),
-            ("🗂 Sets", self.page_manager.show_set_manager),
+            ("🗂 Import Sets", self.page_manager.show_set_manager),
             ("🃏 Card Manager", self.page_manager.show_card_manager),
             ("🚀 Build Listing", self.page_manager.show_build),
             ("📦 Inventory", self.page_manager.show_inventory),
             ("🧾 Sales", self.page_manager.show_sales),
             ("🛒 Marketplace Manager", self.page_manager.show_marketplace_manager),
             ("📈 Business Analytics", self.page_manager.show_business_analytics),
-            ("🧠 Operations Center", self.page_manager.show_operations_center),
             ("🖼 Images", self.page_manager.show_images),
             ("💰 Pricing", self.page_manager.show_pricing),
             ("📊 Statistics", self.page_manager.show_statistics),

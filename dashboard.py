@@ -62,3 +62,7 @@ def show_menu():
     app.mainloop()
 
     return selected["option"]
+
+
+if __name__ == "__main__":
+    show_menu()
